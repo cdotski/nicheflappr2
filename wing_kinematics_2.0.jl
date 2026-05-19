@@ -312,7 +312,7 @@ end
 # ═════════════════════════════════════════════════════════════════════
 
 """
-    build_kinematics_for_mass(m_kg, freq_method = Greenewalt1975();
+    build_kinematics_for_mass(m_kg, freq_method = StrouhalFreq();
                               amp = 60.0,
                               stroke_plane_deg = 80.0,
                               V_forward_ms = NaN) → FlappingKinematics
@@ -321,7 +321,7 @@ Build a `FlappingKinematics` struct from body mass [kg].
 
 # Arguments
 - `m_kg`              : body mass [kg]
-- `freq_method`       : a `FreqScaling` instance (default `Greenewalt1975()`).
+- `freq_method`       : a `FreqScaling` instance (default `StrouhalFreq()`).
                         For `StrouhalFreq`, supply `V_forward_ms` so the
                         forward airspeed is known.
 - `amp`               : stroke half-amplitude — `Real` [°] or an
@@ -330,7 +330,7 @@ Build a `FlappingKinematics` struct from body mass [kg].
 - `V_forward_ms`      : forward airspeed [m/s] required by `StrouhalFreq`.
 """
 function build_kinematics_for_mass(m_kg::Real,
-                                   freq_method::FreqScaling = Greenewalt1975();
+                                   freq_method::FreqScaling = StrouhalFreq();
                                    amp = 60.0,
                                    stroke_plane_deg::Real = 80.0,
                                    V_forward_ms::Real = NaN)

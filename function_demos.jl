@@ -59,25 +59,34 @@ let
 
     m_kg = 0.05
     wd   = build_wing_for_mass(m_kg; n_elements = 10)
-    kin  = build_kinematics_for_mass(m_kg, Greenewalt1975();
-                                     amp = 60.0, stroke_plane_deg = 80.0)
 
-    @printf "Frequency: %.2f Hz, amplitude: %.1f°\n" ustrip(u"Hz", kin.frequency) rad2deg(kin.amplitude)
+    # Strouhal frequency needs a forward airspeed — get V_mr from a
+    # quick bird build, then either pass V_forward_ms as a kwarg or
+    # bake it into the StrouhalFreq struct.
+    bird  = build_bird_from_mass(m_kg)
+    V_mr  = maximum_range_speed(bird)            # [m/s]
 
-    ev = compute_element_velocities(kin, wd, 0.01u"s"; V_forward = 0.0u"m/s")
+    kin  = build_kinematics_for_mass(m_kg, StrouhalFreq();
+                                     amp = 60.0, stroke_plane_deg = 80.0,
+                                     V_forward_ms = V_mr)
+
+    @printf "V_mr = %.2f m/s,  f = %.2f Hz, amplitude = %.1f°\n" V_mr ustrip(u"Hz", kin.frequency) rad2deg(kin.amplitude)
+
+    ev = compute_element_velocities(kin, wd, 0.01u"s"; V_forward = V_mr * u"m/s")
     @printf "v_tip = %s (realised)\n" ev.realised_airspeed[end]
 
     if _PLOTS_AVAILABLE
         ts = range(0u"s", uconvert(u"s", 1/kin.frequency); length = 200)
-        vs = [ustrip(u"m/s", realised_airspeed(kin, wd.elements[end].span_position, t)) for t in ts]
+        vs = [ustrip(u"m/s", realised_airspeed(kin, wd.elements[end].span_position, t;
+                                               V_forward = V_mr * u"m/s")) for t in ts]
         display(plot(ustrip.(u"s", ts), vs;
                      xlabel = "t [s]", ylabel = "tip speed [m/s]",
                      title  = "Tip airspeed over wingbeat"))
     end
 
-    # Strouhal frequency, using a known forward speed
-    str = StrouhalFreq(0.21, 1.225, 8.0)
-    @printf "Strouhal-based f = %.2f Hz (at U = 8 m/s)\n" wingbeat_hz(m_kg, str)
+    # Alternative: bake U into the StrouhalFreq struct itself
+    str = StrouhalFreq(0.21, 1.225, V_mr)
+    @printf "Strouhal-based f = %.2f Hz (at U = %.2f m/s)\n" wingbeat_hz(m_kg, str) V_mr
 end
 
 
@@ -121,13 +130,16 @@ let
     println("\n=== 5. Convective heat loss =================================")
 
     m_kg = 0.05
+    bird  = build_bird_from_mass(m_kg)
+    V_mr  = maximum_range_speed(bird)
     wd   = build_wing_for_mass(m_kg; n_elements = 10)
-    kin  = build_kinematics_for_mass(m_kg, Greenewalt1975(); amp = 60.0)
+    kin  = build_kinematics_for_mass(m_kg, StrouhalFreq(); amp = StrouhalAmplitude(),
+                                     stroke_plane_deg = 80.0, V_forward_ms = V_mr)
     wt   = uniform_temperature(wd, 25.0u"°C")
     air  = air_properties(20.0u"°C"; altitude = 0.0u"m")
 
     wbc = compute_wingbeat_convection(kin, wd, wt, air;
-                                      n_steps = 40, V_forward = 0.0u"m/s")
+                                      n_steps = 40, V_forward = V_mr * u"m/s")
 
     @printf "Q_mean  = %s\n" wbc.Q_mean
     @printf "Q_max   = %s\n" wbc.Q_max
