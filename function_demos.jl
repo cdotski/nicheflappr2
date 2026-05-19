@@ -5,7 +5,7 @@
 #
 #   • wing_geometry_2.0.jl   →  module WingPlates
 #   • wing_kinematics_2.0.jl →  module WingKinematics
-#   • wing_convection_2.0.jl →  module WingConvection
+#   • wing_heatbalance_2.0.jl →  module WingHeatBalance
 #   • wing_power.jl          →  module WingPower
 #
 # Each demo is wrapped in its own `let … end` block and is independent
@@ -16,7 +16,7 @@
 
 include("wing_power.jl")
 
-using .WingPlates, .WingKinematics, .WingConvection, .WingPower
+using .WingPlates, .WingKinematics, .WingHeatBalance, .WingPower
 using Unitful
 using Printf
 
@@ -124,10 +124,10 @@ end
 
 
 # ─────────────────────────────────────────────────────────────────────
-# 5. Convection snapshot + full wingbeat cycle
+# 5. Full heat balance over one wingbeat (single microclimate)
 # ─────────────────────────────────────────────────────────────────────
 let
-    println("\n=== 5. Convective heat loss =================================")
+    println("\n=== 5. Wing heat balance (single microclimate) ==============")
 
     m_kg = 0.05
     bird  = build_bird_from_mass(m_kg)
@@ -135,21 +135,98 @@ let
     wd   = build_wing_for_mass(m_kg; n_elements = 10)
     kin  = build_kinematics_for_mass(m_kg, StrouhalFreq(); amp = StrouhalAmplitude(),
                                      stroke_plane_deg = 80.0, V_forward_ms = V_mr)
-    wt   = uniform_temperature(wd, 25.0u"°C")
-    air  = air_properties(20.0u"°C"; altitude = 0.0u"m")
+    wt   = uniform_temperature(wd, 35.0u"°C")
+    micro = Microclimate(air_temperature  = 20.0u"°C",
+                         wind_speed       = V_mr * u"m/s",
+                         global_radiation = 800.0u"W/m^2",
+                         zenith_angle     = 30.0u"°")
 
-    wbc = compute_wingbeat_convection(kin, wd, wt, air;
-                                      n_steps = 40, V_forward = V_mr * u"m/s")
+    wbh = compute_wingbeat_heatbalance(kin, wd, wt, micro;
+                                       n_steps = 40, V_forward = V_mr * u"m/s")
 
-    @printf "Q_mean  = %s\n" wbc.Q_mean
-    @printf "Q_max   = %s\n" wbc.Q_max
-    @printf "Q_min   = %s\n" wbc.Q_min
-    @printf "Dorsal/Ventral split: %s / %s\n" wbc.Q_dorsal_mean wbc.Q_ventral_mean
+    @printf "Q_conv_mean   = %s\n" wbh.Q_conv_mean
+    @printf "Q_solar_mean  = %s\n" wbh.Q_solar_mean
+    @printf "Q_lw_in_mean  = %s\n" wbh.Q_lw_in_mean
+    @printf "Q_lw_out_mean = %s\n" wbh.Q_lw_out_mean
+    @printf "Q_lw_net_mean = %s\n" wbh.Q_lw_net_mean
+    @printf "Q_net_mean    = %s   (positive ⇒ net heating)\n" wbh.Q_net_mean
+    @printf "Both wings   Q_net = %s\n" WingHeatBalance.both_wings(wbh.Q_net_mean)
 
     if _PLOTS_AVAILABLE
-        display(plot(ustrip.(u"s", wbc.times), ustrip.(u"W", wbc.Q_timeseries);
-                     xlabel = "t [s]", ylabel = "Q [W]",
-                     title  = "Whole-wing Q over wingbeat"))
+        ts = ustrip.(u"s", wbh.times)
+        display(plot(ts, ustrip.(u"W", wbh.Q_conv_series);
+                     label = "Q_conv", xlabel = "t [s]", ylabel = "Q [W]",
+                     title  = "One-wing instantaneous heat flows"))
+        plot!(ts, ustrip.(u"W", wbh.Q_solar_series);  label = "Q_solar")
+        plot!(ts, ustrip.(u"W", wbh.Q_lw_net_series); label = "Q_lw,net")
+        plot!(ts, ustrip.(u"W", wbh.Q_net_series);    label = "Q_net", lw = 2)
+    end
+end
+
+
+# ─────────────────────────────────────────────────────────────────────
+# 5b. Bird in several microclimates — radiation + convection pathways
+# ─────────────────────────────────────────────────────────────────────
+let
+    println("\n=== 5b. Microclimate scenarios ==============================")
+
+    scenarios = [
+        ("Desert midday",       Microclimate(air_temperature = 38.0u"°C",
+                                              ground_temperature = 55.0u"°C",
+                                              sky_temperature = 15.0u"°C",
+                                              wind_speed = 3.0u"m/s",
+                                              zenith_angle = 10.0u"°",
+                                              global_radiation = 1050.0u"W/m^2",
+                                              diffuse_fraction = 0.10,
+                                              relative_humidity = 0.15)),
+        ("Temperate overcast",  Microclimate(air_temperature = 15.0u"°C",
+                                              ground_temperature = 14.0u"°C",
+                                              sky_temperature = 10.0u"°C",
+                                              wind_speed = 4.0u"m/s",
+                                              zenith_angle = 45.0u"°",
+                                              global_radiation = 200.0u"W/m^2",
+                                              diffuse_fraction = 0.85,
+                                              shade = 0.5,
+                                              relative_humidity = 0.85)),
+        ("Alpine cold",         Microclimate(air_temperature = -5.0u"°C",
+                                              ground_temperature = -2.0u"°C",
+                                              sky_temperature = -30.0u"°C",
+                                              wind_speed = 8.0u"m/s",
+                                              zenith_angle = 60.0u"°",
+                                              global_radiation = 700.0u"W/m^2",
+                                              diffuse_fraction = 0.25,
+                                              altitude = 3000.0u"m",
+                                              atmospheric_pressure = 70110.0u"Pa",
+                                              relative_humidity = 0.5)),
+        ("Night flight",        Microclimate(air_temperature = 10.0u"°C",
+                                              ground_temperature = 8.0u"°C",
+                                              sky_temperature = -10.0u"°C",
+                                              wind_speed = 2.0u"m/s",
+                                              zenith_angle = 90.0u"°",
+                                              global_radiation = 0.0u"W/m^2",
+                                              diffuse_fraction = 1.0,
+                                              relative_humidity = 0.7)),
+    ]
+
+    m_kg = 0.05
+    @printf "%-20s %-11s %-11s %-11s %-11s %-11s %-11s\n" "Scenario" "Q_conv" "Q_solar" "Q_lw,in" "Q_lw,out" "Q_net(1)" "Q_net(2)"
+    println("─"^96)
+    for (name, micro) in scenarios
+        b = Q_for_mass(m_kg;
+                       T_air  = micro.air_temperature,
+                       T_wing = 35.0u"°C",
+                       altitude = micro.altitude,
+                       microclimate = micro,
+                       n_elements = 10, n_steps = 40,
+                       amp = StrouhalAmplitude(),
+                       stroke_plane_deg = 80.0,
+                       freq_method = Pennycuick2008MinPower())
+        Qc = ustrip(u"W", Q_conv_mean(b))
+        Qs = ustrip(u"W", Q_solar_mean(b))
+        Qli = ustrip(u"W", Q_lw_in_mean(b))
+        Qlo = ustrip(u"W", Q_lw_out_mean(b))
+        Qn  = ustrip(u"W", Q_net_mean(b))
+        @printf "%-20s %+10.4f %+10.4f %+10.4f %+10.4f %+10.4f %+10.4f\n" name Qc Qs Qli Qlo Qn (2*Qn)
     end
 end
 
@@ -197,9 +274,9 @@ let
                                           altitude = 0.0u"m",
                                           n_elements = 10,
                                           n_steps    = 40,
-                                          amp        = 60.0,
+                                          amp        = StrouhalAmplitude(),
                                           stroke_plane_deg = 80.0,
-                                          freq_method = Greenewalt1975()))
+                                          freq_method = Pennycuick2008MinPower()))
                for (nm, m) in demo_birds]
 
     println()
@@ -218,6 +295,87 @@ let
                     title  = "Convective heat loss across body sizes",
                     xrotation = 35, legend = false))
     end
+end
+
+
+# ─────────────────────────────────────────────────────────────────────
+# 8. Interactive Makie panel — sweep microclimate + bird parameters
+#    (requires GLMakie; degrades gracefully otherwise)
+# ─────────────────────────────────────────────────────────────────────
+let
+    println("\n=== 8. Interactive Makie panel ==============================")
+
+    have_makie = try
+        @eval using GLMakie
+        true
+    catch
+        @info "GLMakie not available — interactive panel skipped."
+        false
+    end
+    have_makie || return
+
+    GLMakie.activate!()
+
+    fig = Figure(size = (1100, 720))
+    Label(fig[0, 1:2], "Wing heat balance — interactive"; fontsize = 18,
+          halign = :center)
+
+    # Sliders
+    sg = SliderGrid(fig[1, 1],
+        (label = "mass [g]",            range = 5:5:1500,   startvalue = 50),
+        (label = "T_air [°C]",          range = -10:1:45,   startvalue = 20),
+        (label = "T_wing [°C]",         range = 5:1:45,     startvalue = 35),
+        (label = "wind [m/s]",          range = 0.5:0.5:15, startvalue = 3),
+        (label = "global rad [W/m²]",   range = 0:50:1100,  startvalue = 800),
+        (label = "zenith [°]",          range = 0:5:90,     startvalue = 30),
+        (label = "RH [-]",              range = 0:0.05:1,   startvalue = 0.5),
+        tellheight = false,
+    )
+    s_m, s_Ta, s_Tw, s_V, s_G, s_Z, s_RH = sg.sliders
+
+    # Live result observable
+    result = lift(s_m.value, s_Ta.value, s_Tw.value, s_V.value,
+                  s_G.value, s_Z.value, s_RH.value) do mg, Ta, Tw, V, G, Z, RH
+        Q_for_mass(mg / 1000;
+                   T_air     = Ta * u"°C",
+                   T_wing    = Tw * u"°C",
+                   wind_speed = V * u"m/s",
+                   global_radiation = G * u"W/m^2",
+                   zenith_angle    = Z * u"°",
+                   relative_humidity = RH,
+                   n_elements = 8, n_steps = 24,
+                   amp = StrouhalAmplitude(),
+                   stroke_plane_deg = 80.0,
+                   freq_method = Pennycuick2008MinPower())
+    end
+
+    labels = ["Q_conv", "Q_solar", "Q_lw,in", "Q_lw,out", "Q_net (1 wing)", "Q_net (both)"]
+    vals = lift(result) do b
+        [ustrip(u"W", Q_conv_mean(b)),
+         ustrip(u"W", Q_solar_mean(b)),
+         ustrip(u"W", Q_lw_in_mean(b)),
+         ustrip(u"W", Q_lw_out_mean(b)),
+         ustrip(u"W", Q_net_mean(b)),
+         2 * ustrip(u"W", Q_net_mean(b))]
+    end
+
+    ax = Axis(fig[1, 2]; xticks = (1:length(labels), labels),
+              ylabel = "Q [W]", title = "Pathway breakdown",
+              xticklabelrotation = π/6)
+    barplot!(ax, 1:length(labels), vals; color = 1:length(labels),
+             colormap = :tab10)
+    hlines!(ax, [0]; color = :black, linestyle = :dash)
+
+    info = lift(result) do b
+        s = summarize(b)
+        string(
+            "f = ", round(s.f_Hz, digits = 2), " Hz  |  ",
+            "V_mr = ", round(s.V_mr, digits = 2), " m/s  |  ",
+            "P_mech = ", round(s.P_mech_W, digits = 3), " W")
+    end
+    Label(fig[2, 1:2], info; tellwidth = false)
+
+    display(fig)
 end
 
 println("\nAll demos complete.")

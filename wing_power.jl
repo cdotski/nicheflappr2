@@ -19,13 +19,13 @@
 #       ╰► bundled into `BirdScaling`
 # =====================================================================
 
-include("wing_convection_2.0.jl")
+include("wing_heatbalance_2.0.jl")
 
 module WingPower
 
 using ..WingPlates
 using ..WingKinematics
-using ..WingConvection
+using ..WingHeatBalance
 using Unitful
 using Printf
 
@@ -303,16 +303,18 @@ struct BirdScaling{WD<:WingDiscretization,
                    K<:FlappingKinematics,
                    A<:AirProperties,
                    WT<:WingTemperatures,
-                   WBC<:WingbeatConvection}
+                   M<:Microclimate,
+                   WBH<:WingbeatHeatBalance}
     bird::Bird
     wing_disc::WD
     kinematics::K
     air::A
     temperatures::WT
+    microclimate::M
     V_mr::Float64                # m/s
     V_mp::Float64                # m/s
     power_mr::FlightPower
-    convection::WBC
+    heatbalance::WBH
 end
 
 
@@ -334,11 +336,18 @@ mean_chord(b::BirdScaling) = b.wing_disc.wing.root_chord
 "Wingbeat frequency [Hz]."
 frequency(b::BirdScaling) = b.kinematics.frequency
 
-Q_mean(b::BirdScaling) = b.convection.Q_mean
-Q_max(b::BirdScaling)  = b.convection.Q_max
-Q_min(b::BirdScaling)  = b.convection.Q_min
+Q_mean(b::BirdScaling) = b.heatbalance.Q_conv_mean
+Q_max(b::BirdScaling)  = maximum(b.heatbalance.Q_conv_series)
+Q_min(b::BirdScaling)  = minimum(b.heatbalance.Q_conv_series)
 
-"Heat-flux density q = Q_mean / (dorsal + ventral area)."
+Q_conv_mean(b::BirdScaling)   = b.heatbalance.Q_conv_mean
+Q_solar_mean(b::BirdScaling)  = b.heatbalance.Q_solar_mean
+Q_lw_in_mean(b::BirdScaling)  = b.heatbalance.Q_lw_in_mean
+Q_lw_out_mean(b::BirdScaling) = b.heatbalance.Q_lw_out_mean
+Q_lw_net_mean(b::BirdScaling) = b.heatbalance.Q_lw_net_mean
+Q_net_mean(b::BirdScaling)    = b.heatbalance.Q_net_mean
+
+"Heat-flux density q = Q_conv_mean / (dorsal + ventral area)."
 q_density(b::BirdScaling) = uconvert(u"W/m^2", Q_mean(b) / wing_surface_area(b))
 
 "Driving temperature difference T_wing − T_air [K] (using element 1)."
@@ -356,13 +365,22 @@ Run the full pipeline:
 4. V_mp, V_mr ← afpt-simplified `flapping_power`
 5. Kinematics ← `build_kinematics_for_mass` (V_mr available for Strouhal)
 6. Temperatures ← `uniform_temperature` (override via `temperatures_builder`)
-7. Convection ← `compute_wingbeat_convection`
+7. Heat balance ← `compute_wingbeat_heatbalance` (HeatExchange.jl convection +
+   radiation_in + radiation_out + solar)
 
 # Environment / temperatures
 - `T_air`, `T_wing`        : ambient and wing surface temperatures (Unitful)
 - `altitude`               : altitude (Unitful length); used if `P` is `nothing`
 - `P`                      : ambient pressure (Unitful); overrides `altitude`
+- `microclimate`           : pre-built `Microclimate`; overrides individual env kwargs
 - `temperatures_builder`   : `(wing_disc) -> WingTemperatures` for a non-uniform profile
+
+# Microclimate kwargs (only used if `microclimate === nothing`)
+- `sky_temperature`, `ground_temperature`, `relative_humidity`,
+  `wind_speed`, `zenith_angle`, `global_radiation`, `diffuse_fraction`, `shade`
+
+# Radiative optical properties
+- `absorptivities`, `emissivities`, `view_factors` : HeatExchange struct overrides
 
 # Discretisation
 - `n_elements`             : span-wise plate elements (default 10)
@@ -399,6 +417,20 @@ function Q_for_mass(m_kg::Real;
                     altitude::Quantity     = 0.0u"m",
                     P                      = nothing,
                     temperatures_builder   = nothing,
+                    # ── microclimate ────────────────────────────────
+                    microclimate                  = nothing,
+                    sky_temperature::Quantity     = 0.0u"°C",
+                    ground_temperature::Quantity  = 25.0u"°C",
+                    relative_humidity::Real       = 0.5,
+                    wind_speed::Quantity          = 1.0u"m/s",
+                    zenith_angle::Quantity        = 30.0u"°",
+                    global_radiation::Quantity    = 800.0u"W/m^2",
+                    diffuse_fraction::Real        = 0.15,
+                    shade::Real                   = 0.0,
+                    # ── radiation optics ────────────────────────────
+                    absorptivities = WingHeatBalance.default_absorptivities(),
+                    emissivities   = WingHeatBalance.default_emissivities(),
+                    view_factors   = WingHeatBalance.default_view_factors(),
                     # ── discretisation ──────────────────────────────
                     n_elements::Int        = 10,
                     n_steps::Int           = 40,
@@ -426,7 +458,22 @@ function Q_for_mass(m_kg::Real;
                     V_lo::Real             = 2.0,
                     V_hi::Real             = 40.0,
                     V_n::Int               = 4001)
-    air = air_properties(T_air; altitude = altitude, P = P)
+    micro = microclimate === nothing ?
+            Microclimate(; air_temperature      = T_air,
+                           sky_temperature      = sky_temperature,
+                           ground_temperature   = ground_temperature,
+                           relative_humidity    = relative_humidity,
+                           wind_speed           = wind_speed,
+                           atmospheric_pressure =
+                               P === nothing ?
+                                   WingHeatBalance.atmospheric_pressure(altitude) : P,
+                           zenith_angle         = zenith_angle,
+                           global_radiation     = global_radiation,
+                           diffuse_fraction     = diffuse_fraction,
+                           shade                = shade,
+                           altitude             = altitude) :
+            microclimate
+    air = air_properties(T_air; altitude = altitude, P = micro.atmospheric_pressure)
     ρ   = ustrip(u"kg/m^3", air.ρ)
     ν   = ustrip(u"m^2/s",  air.ν)
 
@@ -463,11 +510,15 @@ function Q_for_mass(m_kg::Real;
             uniform_temperature(wd, T_wing) :
             temperatures_builder(wd)
 
-    wbc = compute_wingbeat_convection(kin, wd, wt, air;
-              n_steps = n_steps, V_forward = V_mr * u"m/s")
+    wbh = compute_wingbeat_heatbalance(kin, wd, wt, micro;
+              n_steps        = n_steps,
+              V_forward      = V_mr * u"m/s",
+              absorptivities = absorptivities,
+              emissivities   = emissivities,
+              view_factors   = view_factors)
 
-    return BirdScaling(bird, wd, kin, air, wt,
-                       Float64(V_mr), Float64(V_mp), P_mr, wbc)
+    return BirdScaling(bird, wd, kin, air, wt, micro,
+                       Float64(V_mr), Float64(V_mp), P_mr, wbh)
 end
 
 
@@ -507,7 +558,9 @@ export Bird, FlightPower, BirdScaling,
        minimum_power_speed, maximum_range_speed,
        Q_for_mass, summarize,
        wingspan, wing_planform_area, wing_surface_area, mean_chord,
-       frequency, Q_mean, Q_max, Q_min, q_density, ΔT
+       frequency, Q_mean, Q_max, Q_min, q_density, ΔT,
+       Q_conv_mean, Q_solar_mean, Q_lw_in_mean, Q_lw_out_mean,
+       Q_lw_net_mean, Q_net_mean
 
 
 end # module WingPower
