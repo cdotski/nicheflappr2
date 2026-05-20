@@ -392,7 +392,7 @@ Run the full pipeline:
 # Kinematics
 - `amp`                    : stroke half-amplitude — degrees or an `AmpScaling`
 - `stroke_plane_deg`       : stroke-plane tilt [°]
-- `freq_method`            : a `FreqScaling` instance (default `Greenewalt1975()`)
+- `freq_method`            : a `FreqScaling` instance (default `StrouhalFreq()` — uses V_mr internally)
 
 # Bird allometry / aerodynamics — overrides for `build_bird_from_mass`
 - `type`                   : `:passerine`, `:seabird`, `:bat`, `:other`
@@ -413,7 +413,7 @@ Run the full pipeline:
 function Q_for_mass(m_kg::Real;
                     # ── environment ─────────────────────────────────
                     T_air::Quantity        = 20.0u"°C",
-                    T_wing::Quantity       = 25.0u"°C",
+                    T_wing::Quantity       = 24.0u"°C",
                     altitude::Quantity     = 0.0u"m",
                     P                      = nothing,
                     temperatures_builder   = nothing,
@@ -439,9 +439,9 @@ function Q_for_mass(m_kg::Real;
                     dorsal_active::Bool    = true,
                     ventral_active::Bool   = true,
                     # ── kinematics ──────────────────────────────────
-                    amp                    = 60.0,
+                    amp                    = StrouhalAmplitude(),
                     stroke_plane_deg::Real = 80.0,
-                    freq_method::FreqScaling = Greenewalt1975(),
+                    freq_method::FreqScaling = StrouhalFreq(),
                     # ── bird allometry / aero overrides ─────────────
                     type::Symbol                = :other,
                     wing_span                   = nothing,
@@ -456,7 +456,7 @@ function Q_for_mass(m_kg::Real;
                     respiration_factor::Real    = 1.1,
                     # ── power-speed search ──────────────────────────
                     V_lo::Real             = 2.0,
-                    V_hi::Real             = 40.0,
+                    V_hi::Real             = 50.0,
                     V_n::Int               = 4001)
     micro = microclimate === nothing ?
             Microclimate(; air_temperature      = T_air,

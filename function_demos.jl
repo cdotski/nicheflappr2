@@ -67,7 +67,7 @@ let
     V_mr  = maximum_range_speed(bird)            # [m/s]
 
     kin  = build_kinematics_for_mass(m_kg, StrouhalFreq();
-                                     amp = 60.0, stroke_plane_deg = 80.0,
+                                     amp = StrouhalAmplitude(), stroke_plane_deg = 80.0,
                                      V_forward_ms = V_mr)
 
     @printf "V_mr = %.2f m/s,  f = %.2f Hz, amplitude = %.1f°\n" V_mr ustrip(u"Hz", kin.frequency) rad2deg(kin.amplitude)
@@ -220,7 +220,7 @@ let
                        n_elements = 10, n_steps = 40,
                        amp = StrouhalAmplitude(),
                        stroke_plane_deg = 80.0,
-                       freq_method = Pennycuick2008MinPower())
+                       freq_method = StrouhalFreq())
         Qc = ustrip(u"W", Q_conv_mean(b))
         Qs = ustrip(u"W", Q_solar_mean(b))
         Qli = ustrip(u"W", Q_lw_in_mean(b))
@@ -276,7 +276,7 @@ let
                                           n_steps    = 40,
                                           amp        = StrouhalAmplitude(),
                                           stroke_plane_deg = 80.0,
-                                          freq_method = Pennycuick2008MinPower()))
+                                          freq_method = StrouhalFreq()))
                for (nm, m) in demo_birds]
 
     println()
@@ -346,7 +346,7 @@ let
                    n_elements = 8, n_steps = 24,
                    amp = StrouhalAmplitude(),
                    stroke_plane_deg = 80.0,
-                   freq_method = Pennycuick2008MinPower())
+                   freq_method = StrouhalFreq())
     end
 
     labels = ["Q_conv", "Q_solar", "Q_lw,in", "Q_lw,out", "Q_net (1 wing)", "Q_net (both)"]
@@ -374,6 +374,161 @@ let
             "P_mech = ", round(s.P_mech_W, digits = 3), " W")
     end
     Label(fig[2, 1:2], info; tellwidth = false)
+
+    display(fig)
+end
+
+
+# ─────────────────────────────────────────────────────────────────────
+# 9. Wireframe of element airspeed over the wingbeat cycle
+#    (specify a wing directly, or scale one from mass)
+# ─────────────────────────────────────────────────────────────────────
+let
+    println("\n=== 9. Element-airspeed wireframe ===========================")
+
+    have_makie = try
+        @eval using GLMakie
+        true
+    catch
+        @info "GLMakie not available — wireframe skipped."
+        false
+    end
+    have_makie || return
+
+    GLMakie.activate!()
+
+    # ---- choose one: scale from mass, or build a wing by hand --------
+    use_scaled = true   # flip to false to use the by-hand wing below
+    m_kg       = 0.05
+    n_elements = 16
+    n_steps    = 60
+
+    if use_scaled
+        wd    = build_wing_for_mass(m_kg; n_elements = n_elements)
+        bird  = build_bird_from_mass(m_kg)
+        V_mr  = maximum_range_speed(bird)
+        kin   = build_kinematics_for_mass(m_kg, StrouhalFreq();
+                                          amp = StrouhalAmplitude(),
+                                          stroke_plane_deg = 80.0,
+                                          V_forward_ms = V_mr)
+    else
+        wing = WingGeometry(wing_length = 0.20u"m",
+                            root_chord  = 0.06u"m",
+                            tip_chord   = 0.03u"m",
+                            thickness   = 0.002u"m")
+        wd   = discretize_wing(wing, Discretization(n_elements = n_elements))
+        V_mr = 8.0
+        kin  = build_kinematics_for_mass(0.05, StrouhalFreq();
+                                         amp = StrouhalAmplitude(),
+                                         stroke_plane_deg = 80.0,
+                                         V_forward_ms = V_mr)
+    end
+
+    # ---- sample v_realised on the (element × time) grid --------------
+    T_period = uconvert(u"s", 1 / kin.frequency)
+    times    = collect(range(0u"s", T_period; length = n_steps))
+    elem_ids = collect(1:n_elements)
+    V        = Matrix{Float64}(undef, n_elements, n_steps)
+    for (j, t) in enumerate(times)
+        ev = compute_element_velocities(kin, wd, t; V_forward = V_mr * u"m/s")
+        V[:, j] .= ustrip.(u"m/s", ev.realised_airspeed)
+    end
+    ts_s = ustrip.(u"s", times)
+
+    fig = Figure(size = (900, 650))
+    Label(fig[0, 1],
+          "Realised element airspeed — m = $(round(m_kg*1000, digits=1)) g, " *
+          "V_mr = $(round(V_mr, digits=2)) m/s, f = " *
+          "$(round(ustrip(u"Hz", kin.frequency), digits=2)) Hz";
+          fontsize = 15, halign = :center)
+    ax = Axis3(fig[1, 1];
+               xlabel = "element id",
+               ylabel = "t [s]",
+               zlabel = "v_realised [m/s]",
+               azimuth = 1.2π, elevation = π/8)
+    GLMakie.wireframe!(ax, elem_ids, ts_s, V; color = :steelblue)
+    display(fig)
+end
+
+
+# ─────────────────────────────────────────────────────────────────────
+# 10. Interactive wireframe — slide body mass, everything else scales
+# ─────────────────────────────────────────────────────────────────────
+let
+    println("\n=== 10. Interactive element-airspeed wireframe ==============")
+
+    have_makie = try
+        @eval using GLMakie
+        true
+    catch
+        @info "GLMakie not available — interactive wireframe skipped."
+        false
+    end
+    have_makie || return
+
+    GLMakie.activate!()
+
+    n_elements = 16
+    n_steps    = 60
+    elem_ids   = collect(1:n_elements)
+
+    fig = Figure(size = (1000, 720))
+    Label(fig[0, 1:2],
+          "Element airspeed vs wingbeat phase — slide body mass";
+          fontsize = 16, halign = :center)
+
+    sg = SliderGrid(fig[2, 1:2],
+        (label = "mass [g]", range = 5:5:15000, startvalue = 50),
+        tellheight = false,
+    )
+    s_m = sg.sliders[1]
+
+    # Surface (element × time) re-computed live from mass
+    grid = lift(s_m.value) do mg
+        m_kg = mg / 1000
+        wd   = build_wing_for_mass(m_kg; n_elements = n_elements)
+        bird = build_bird_from_mass(m_kg)
+        V_mr = maximum_range_speed(bird)
+        kin  = build_kinematics_for_mass(m_kg, StrouhalFreq();
+                                         amp = StrouhalAmplitude(),
+                                         stroke_plane_deg = 80.0,
+                                         V_forward_ms = V_mr)
+        T_period = uconvert(u"s", 1 / kin.frequency)
+        times    = collect(range(0u"s", T_period; length = n_steps))
+        V        = Matrix{Float64}(undef, n_elements, n_steps)
+        for (j, t) in enumerate(times)
+            ev = compute_element_velocities(kin, wd, t; V_forward = V_mr * u"m/s")
+            V[:, j] .= ustrip.(u"m/s", ev.realised_airspeed)
+        end
+        (ts = ustrip.(u"s", times), V = V, V_mr = V_mr,
+         f_Hz = ustrip(u"Hz", kin.frequency),
+         b2_m = ustrip(u"m", wd.wing.wing_length))
+    end
+
+    ts_obs = lift(g -> g.ts, grid)
+    V_obs  = lift(g -> g.V,  grid)
+
+    info = lift(grid) do g
+        "V_mr = $(round(g.V_mr, digits=2)) m/s   |   " *
+        "f = $(round(g.f_Hz, digits=2)) Hz   |   " *
+        "b/2 = $(round(g.b2_m, digits=3)) m"
+    end
+    Label(fig[3, 1:2], info; tellwidth = false)
+
+    ax = Axis3(fig[1, 1:2];
+               xlabel = "element id",
+               ylabel = "t [s]",
+               zlabel = "v_realised [m/s]",
+               azimuth = 1.2π, elevation = π/8)
+    GLMakie.wireframe!(ax, elem_ids, ts_obs, V_obs; color = :steelblue)
+
+    # Fixed z-range so the wireframe shape is visually comparable across masses.
+    # y-axis (period) still fits to data since period shrinks with mass.
+    GLMakie.zlims!(ax, 5, 30)
+    on(grid) do g
+        GLMakie.ylims!(ax, 0, maximum(g.ts))
+    end
+    notify(grid)
 
     display(fig)
 end

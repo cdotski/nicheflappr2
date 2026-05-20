@@ -19,17 +19,20 @@
 # inputs to the heat balance, not heat-transfer formulas.
 # =====================================================================
 
+include("environment.jl")
 include("wing_kinematics_2.0.jl")
 
 module WingHeatBalance
 
 using ..WingPlates
 using ..WingKinematics
+using ..FlightEnvironment
+using ..FlightEnvironment: Microclimate, microclimate_at_altitude,
+                           microclimate_from_microresult
 using Unitful
 
 using BiophysicalGeometry
 using BiophysicalGeometry: Body, Plate, Naked, total_area, silhouette_area
-using HeatExchange
 using HeatExchange: convection, radiation_in, radiation_out, solar,
                     Absorptivities, Emissivities, ViewFactors,
                     SolarConditions, EnvironmentTemperatures,
@@ -112,45 +115,11 @@ end
 # =====================================================================
 # Microclimate container
 # =====================================================================
-
-"""
-    Microclimate(; air_temperature, sky_temperature, ground_temperature,
-                   relative_humidity, wind_speed, atmospheric_pressure,
-                   zenith_angle, global_radiation, diffuse_fraction, shade,
-                   altitude, gas_fractions)
-
-A flat container of the environmental variables consumed by
-`HeatExchange.convection`, `HeatExchange.radiation_in`,
-`HeatExchange.radiation_out` and `HeatExchange.solar`.
-
-Defaults represent a clear-sky temperate day at sea level with the sun
-overhead.
-"""
-@kwdef struct Microclimate{TA,TS,TG,RH,WS,PA,ZA,GR,FD,SH,AL,GF}
-    air_temperature::TA       = 20.0u"°C"
-    sky_temperature::TS       = 0.0u"°C"           # effective sky temperature
-    ground_temperature::TG    = 25.0u"°C"
-    relative_humidity::RH     = 0.5
-    wind_speed::WS            = 1.0u"m/s"
-    atmospheric_pressure::PA  = 101325.0u"Pa"
-    zenith_angle::ZA          = 30.0u"°"
-    global_radiation::GR      = 800.0u"W/m^2"
-    diffuse_fraction::FD      = 0.15
-    shade::SH                 = 0.0                # fraction in shade [0,1]
-    altitude::AL              = 0.0u"m"
-    gas_fractions::GF         = GasFractions()
-end
-
-"""
-    microclimate_at_altitude(; altitude, …)
-
-Convenience constructor that fills `atmospheric_pressure` from
-`FluidProperties.atmospheric_pressure(altitude)`.
-"""
-function microclimate_at_altitude(; altitude::Quantity = 0.0u"m", kwargs...)
-    P = atmospheric_pressure(altitude)
-    return Microclimate(; altitude = altitude, atmospheric_pressure = P, kwargs...)
-end
+#
+# `Microclimate` and `microclimate_at_altitude` are defined in
+# `environment.jl` (module `FlightEnvironment`) so they can be shared
+# with a future body heat-balance module.  They are re-exported below
+# for backward compatibility.
 
 
 # =====================================================================
@@ -605,7 +574,7 @@ both_wings(Q) = 2 * Q
 
 export WingTemperatures,
        AirProperties, air_properties,
-       Microclimate, microclimate_at_altitude,
+       Microclimate, microclimate_at_altitude, microclimate_from_microresult,
        ElementHeatBalance, WingHeatSnapshot, WingbeatHeatBalance,
        uniform_temperature, linear_gradient, exponential_decay,
        custom_per_element, from_function, dorsal_ventral_split,
