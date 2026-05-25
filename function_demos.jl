@@ -17,6 +17,7 @@
 include("wing_power.jl")
 
 using .WingPlates, .WingKinematics, .WingHeatBalance, .WingPower
+using .AFPT: build_afpt_bird, compute_flight_performance
 using Unitful
 using Printf
 
@@ -135,10 +136,10 @@ let
     wd   = build_wing_for_mass(m_kg; n_elements = 10)
     kin  = build_kinematics_for_mass(m_kg, StrouhalFreq(); amp = StrouhalAmplitude(),
                                      stroke_plane_deg = 80.0, V_forward_ms = V_mr)
-    wt   = uniform_temperature(wd, 35.0u"°C")
+    wt   = uniform_temperature(wd, 23.0u"°C")
     micro = Microclimate(air_temperature  = 20.0u"°C",
                          wind_speed       = V_mr * u"m/s",
-                         global_radiation = 800.0u"W/m^2",
+                         global_radiation = 600.0u"W/m^2",
                          zenith_angle     = 30.0u"°")
 
     wbh = compute_wingbeat_heatbalance(kin, wd, wt, micro;
@@ -165,7 +166,8 @@ end
 
 
 # ─────────────────────────────────────────────────────────────────────
-# 5b. Bird in several microclimates — radiation + convection pathways
+# 5b. Bird in several microclimates — radiation + convection pathways # NQR: 
+# the airspeed etc. plugs in weird
 # ─────────────────────────────────────────────────────────────────────
 let
     println("\n=== 5b. Microclimate scenarios ==============================")
@@ -245,7 +247,7 @@ let
     @printf "V_mp = %.2f m/s,  V_mr = %.2f m/s\n" V_mp V_mr
 
     if _PLOTS_AVAILABLE
-        Vs = range(3.0, 30.0; length = 200)
+        Vs = range(0.5, 30.0; length = 200)
         Ps = [flapping_power(bird, V).P_mech for V in Vs]
         display(plot(collect(Vs), Ps;
                      xlabel = "V [m/s]", ylabel = "P_mech [W]",
@@ -256,6 +258,8 @@ end
 
 # ─────────────────────────────────────────────────────────────────────
 # 7. Full pipeline: Q_for_mass scaling sweep
+#    Sweeps the three plate-convection regimes side-by-side so the
+#    laminar / turbulent / mixed q[W/m²] behaviour can be compared.
 # ─────────────────────────────────────────────────────────────────────
 let
     println("\n=== 7. Q_for_mass sweep =====================================")
@@ -266,34 +270,62 @@ let
         ("Pigeon (300 g)",      0.300),
         ("Crow (500 g)",        0.500),
         ("Owl (1.5 kg)",        1.5),
+        ("Goose (5 kg)",        5.0),
+        ("Swan (15 kg)",       15.0),
     ]
 
-    results = [(name = nm, b = Q_for_mass(m;
-                                          T_air  = 20.0u"°C",
-                                          T_wing = 25.0u"°C",
-                                          altitude = 0.0u"m",
-                                          n_elements = 10,
-                                          n_steps    = 40,
-                                          amp        = StrouhalAmplitude(),
-                                          stroke_plane_deg = 80.0,
-                                          freq_method = StrouhalFreq()))
-               for (nm, m) in demo_birds]
+    modes = [(:laminar,   "Laminar (Pohlhausen, Nu = 0.664·√Re·Pr^(1/3))",            LaminarPlate()),
+             (:turbulent, "Turbulent (Nu = 0.037·Re^0.8·Pr^(1/3))",                   TurbulentPlate()),
+             (:mixed,     "Mixed laminar/turbulent (transition at Re_c = 5·10^5)",    MixedPlate())]
 
-    println()
-    @printf "%-22s %-8s %-8s %-8s %-9s %-9s\n" "Bird" "m[kg]" "f[Hz]" "V_mr" "Q_mean[W]" "q[W/m²]"
-    println("─"^70)
-    for r in results
-        s = summarize(r.b)
-        @printf "%-22s %-8.4f %-8.2f %-8.2f %-9.4f %-9.2f\n" r.name s.m_kg s.f_Hz s.V_mr s.Q_mean_W s.q_per_m2
+    for (label, header, mode) in modes
+        println("\n--- $header ---")
+        @printf "%-22s %-7s %-7s %-9s %-9s\n" "Bird" "m[kg]" "V_mr" "Q[W]" "q[W/m²]"
+        println("─"^60)
+        for (nm, m) in demo_birds
+            b = Q_for_mass(m;
+                           T_air  = 20.0u"°C",
+                           T_wing = 23.0u"°C",
+                           altitude = 0.0u"m",
+                           n_elements = 10,
+                           n_steps    = 40,
+                           amp        = StrouhalAmplitude(),
+                           stroke_plane_deg = 80.0,
+                           freq_method = StrouhalFreq(),
+                           convection_model = mode,
+                           power_model = :afpt)
+            s = summarize(b)
+            @printf "%-22s %-7.4f %-7.2f %-9.4f %-9.2f\n" nm s.m_kg s.V_mr s.Q_mean_W s.q_per_m2
+        end
     end
+end
 
-    if _PLOTS_AVAILABLE
-        masses = [s.m_kg     for s in summarize.(getfield.(results, :b))]
-        Qmean  = [s.Q_mean_W for s in summarize.(getfield.(results, :b))]
-        display(bar(string.(getfield.(results, :name)), Qmean;
-                    xlabel = "Bird", ylabel = "Q_mean [W]",
-                    title  = "Convective heat loss across body sizes",
-                    xrotation = 35, legend = false))
+
+# ─────────────────────────────────────────────────────────────────────
+# 7b. AFPT flight-performance summary (full Klein Heerenbrink port)
+#     V_mp, V_mr, V_max, V_mt and maximum climb-rate for each demo bird.
+# ─────────────────────────────────────────────────────────────────────
+let
+    println("\n=== 7b. AFPT flight performance =============================")
+
+    @printf "%-22s %-7s %-7s %-7s %-7s %-9s\n" "Bird" "V_mp" "V_mr" "V_max" "V_mt" "climb[m/s]"
+    println("─"^72)
+    for (nm, m) in [("Sparrow (30 g)", 0.030),
+                    ("Pigeon (300 g)", 0.300),
+                    ("Crow (500 g)",   0.500),
+                    ("Owl (1.5 kg)",   1.5),
+                    ("Goose (5 kg)",   5.0),
+                    ("Swan (15 kg)",  15.0)]
+        # Allometric span b ≈ 0.96·m^(1/3), area S ≈ 0.16·m^(2/3)
+        # (Pennycuick / Greenewalt-style power laws).
+        span = 0.96 * m^(1/3)
+        area = 0.16 * m^(2/3)
+        ab = build_afpt_bird(m, span; wingArea = area, type = :other)
+        perf = compute_flight_performance(ab; length_out = 21,
+                                          V_lo = 2.0, V_hi = 40.0)
+        Vmax_str = perf.V_max === nothing ? "  —  " :
+                   string(round(perf.V_max, digits = 2))
+        @printf "%-22s %-7.2f %-7.2f %-7s %-7.2f %-9.3f\n" nm perf.V_mp perf.V_mr Vmax_str perf.V_mt perf.climb.climbRate
     end
 end
 

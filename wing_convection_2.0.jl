@@ -9,20 +9,31 @@
 # keeps the module usable stand-alone.  Altitude is supported through
 # `FluidProperties.atmospheric_pressure`.
 #
-# Heat-transfer model (per element):
-#   Re = V · c / ν
-#   Nu = 0.664 · Re^0.5 · Pr^(1/3)        (laminar flat-plate)
-#   h  = Nu · k_air / c
-#   Q  = h · A · (T_surface − T_air)
-# Dorsal and ventral surfaces are treated independently.
+# Heat-transfer models (per element).  Three flat-plate regimes are
+# available through `PlateConvectionRegime`:
+#
+#   :laminar   Nu = 0.664 · Re^0.5 · Pr^(1/3)                           (Pohlhausen)
+#   :turbulent Nu = 0.037 · Re^0.8 · Pr^(1/3)                           (fully turbulent)
+#   :mixed     Nu = (0.037·Re^0.8 − A) · Pr^(1/3)   if Re > Re_c        (Incropera mixed)
+#              Nu =  0.664·Re^0.5·Pr^(1/3)         otherwise            (Re_c default 5e5)
+#
+# with A = 0.037·Re_c^0.8 − 0.664·Re_c^0.5 chosen so the curve is
+# continuous at the transition.  Dorsal and ventral surfaces are
+# treated independently.
 # =====================================================================
 
 include("wing_kinematics_2.0.jl")
+include("convection_regimes.jl")
 
 module WingConvection
 
 using ..WingPlates
 using ..WingKinematics
+using ..ConvectionRegimes
+using ..ConvectionRegimes: PlateConvectionRegime, LaminarPlate, TurbulentPlate,
+                           MixedPlate, nusselt_plate, nusselt_laminar,
+                           nusselt_turbulent, nusselt_mixed, convection_h,
+                           reynolds_number
 using Unitful
 
 # Optional dependency: FluidProperties.jl (BiophysicalEcology)
@@ -327,25 +338,19 @@ export WingTemperatures, AirProperties,
        custom_per_element, from_function, dorsal_ventral_split,
        to_K, to_C,
        air_properties, pressure_at_altitude,
-       reynolds_number, nusselt_laminar, heat_transfer_coeff,
+       reynolds_number, heat_transfer_coeff,
+       nusselt_laminar, nusselt_turbulent, nusselt_mixed, nusselt_plate,
+       convection_h,
+       PlateConvectionRegime, LaminarPlate, TurbulentPlate, MixedPlate,
        compute_convection_snapshot, compute_wingbeat_convection
 
 
 # ── Convection primitives ───────────────────────────────────────────
+# (reynolds_number, nusselt_*, convection_h and the
+#  PlateConvectionRegime types live in the shared ConvectionRegimes
+#  module; we just bring `heat_transfer_coeff` for backward compat.)
 
-function reynolds_number(V, L, ν)::Float64
-    V_num = isa(V, Quantity) ? ustrip(u"m/s",   V) : V
-    L_num = isa(L, Quantity) ? ustrip(u"m",     L) : L
-    ν_num = isa(ν, Quantity) ? ustrip(u"m^2/s", ν) : ν
-    return V_num * L_num / ν_num
-end
-
-function nusselt_laminar(Re::Float64, Pr::Float64)::Float64
-    Re ≤ 0.0 && return 0.0
-    return 0.664 * sqrt(Re) * Pr^(1/3)
-end
-
-function heat_transfer_coeff(Nu::Float64, k_air, L)
+function heat_transfer_coeff(Nu::Real, k_air, L)
     k_num = isa(k_air, Quantity) ? ustrip(u"W/(m*K)", k_air) : k_air
     L_num = isa(L,     Quantity) ? ustrip(u"m",       L)     : L
     return (Nu * k_num / L_num) * u"W/(m^2*K)"
@@ -353,12 +358,19 @@ end
 
 
 """
-    compute_convection_snapshot(wing_disc, ev, wt, air) → ConvectionSnapshot
+    compute_convection_snapshot(wing_disc, ev, wt, air;
+                                regime::PlateConvectionRegime = LaminarPlate())
+        → ConvectionSnapshot
+
+Per-element convective heat transfer for one instant in the wingbeat.
+The `regime` keyword selects the Nusselt correlation:
+`LaminarPlate()`, `TurbulentPlate()`, or `MixedPlate(Re_c)`.
 """
 function compute_convection_snapshot(wing_disc::WingDiscretization,
                                      ev::ElementVelocities,
                                      wt::WingTemperatures,
-                                     air)::ConvectionSnapshot
+                                     air;
+                                     regime::PlateConvectionRegime = LaminarPlate())::ConvectionSnapshot
     n = length(wing_disc.elements)
     elems = Vector{ElementConvection}(undef, n)
     Q_d_total = 0.0u"W"
@@ -372,7 +384,7 @@ function compute_convection_snapshot(wing_disc::WingDiscretization,
         chord = elem.chord_length
 
         Re = reynolds_number(V, chord, air.ν)
-        Nu = nusselt_laminar(Re, air.Pr)
+        Nu = nusselt_plate(regime, Re, air.Pr)
         h  = heat_transfer_coeff(Nu, air.k_air, chord)
 
         T_d_C = isa(wt.T_dorsal[i],  Quantity) ? uconvert(u"°C", wt.T_dorsal[i])  : wt.T_dorsal[i]  * u"°C"
@@ -426,7 +438,8 @@ function compute_wingbeat_convection(kin::FlappingKinematics,
                                      wt::WingTemperatures,
                                      air;
                                      n_steps::Int = 50,
-                                     V_forward = 0.0u"m/s")
+                                     V_forward = 0.0u"m/s",
+                                     regime::PlateConvectionRegime = LaminarPlate())
     freq_Hz = isa(kin.frequency, Quantity) ? ustrip(u"Hz", kin.frequency) : kin.frequency
     period  = 1.0u"s" / freq_Hz
     times   = [(i - 1) * period / n_steps for i in 1:n_steps]
@@ -436,7 +449,7 @@ function compute_wingbeat_convection(kin::FlappingKinematics,
 
     for (j, t) in enumerate(times)
         ev = compute_element_velocities(kin, wing_disc, t, V_forward = V_forward)
-        snapshots[j]    = compute_convection_snapshot(wing_disc, ev, wt, air)
+        snapshots[j]    = compute_convection_snapshot(wing_disc, ev, wt, air; regime = regime)
         Q_timeseries[j] = snapshots[j].Q_total
     end
 

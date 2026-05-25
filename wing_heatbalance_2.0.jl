@@ -21,6 +21,7 @@
 
 include("environment.jl")
 include("wing_kinematics_2.0.jl")
+include("convection_regimes.jl")
 
 module WingHeatBalance
 
@@ -29,6 +30,9 @@ using ..WingKinematics
 using ..FlightEnvironment
 using ..FlightEnvironment: Microclimate, microclimate_at_altitude,
                            microclimate_from_microresult
+using ..ConvectionRegimes
+using ..ConvectionRegimes: PlateConvectionRegime, LaminarPlate, TurbulentPlate,
+                           MixedPlate, nusselt_plate, reynolds_number, convection_h
 using Unitful
 
 using BiophysicalGeometry
@@ -310,7 +314,9 @@ function element_heat_balance(elem::WingElement,
                               view_factors::ViewFactors,
                               characteristic_dim_formula = ScaledDimension(:length_skin),
                               conduction_fraction::Real = 0.0,
-                              silhouette_area_override = nothing)::ElementHeatBalance
+                              silhouette_area_override = nothing,
+                              convection_model::Union{Nothing,PlateConvectionRegime} = nothing,
+                              air::Union{Nothing,AirProperties} = nothing)::ElementHeatBalance
 
     T_d_K = uconvert(u"K", isa(T_dorsal,  Quantity) ? T_dorsal  : T_dorsal  * u"°C")
     T_v_K = uconvert(u"K", isa(T_ventral, Quantity) ? T_ventral : T_ventral * u"°C")
@@ -318,34 +324,71 @@ function element_heat_balance(elem::WingElement,
     A_d   = elem.has_dorsal  ? elem.dorsal_area  : 0.0u"m^2"
     A_v   = elem.has_ventral ? elem.ventral_area : 0.0u"m^2"
 
-    # ── Convection (call HeatExchange separately per surface) ──────
+    # ── Convection ───────────────────────────────────────────────────
+    # Two code paths:
+    #   (a) convection_model === nothing  → HeatExchange.convection
+    #                                       (default turbulent flat plate;
+    #                                        package default)
+    #   (b) convection_model isa PlateConvectionRegime → explicit
+    #       flat-plate correlation using local chord, air.ν, air.Pr,
+    #       air.k_air with Re = V_air · chord / ν.
     Q_conv_d = 0.0u"W"; Q_conv_v = 0.0u"W"; h_avg = 0.0u"W/(m^2*K)"
-    if A_d > 0u"m^2"
-        cd = convection(; body = body, area = A_d,
-                          air_temperature       = T_air,
-                          surface_temperature   = T_d_K,
-                          wind_speed            = V_air,
-                          atmospheric_pressure  = micro.atmospheric_pressure,
-                          fluid                 = Air(),
-                          gas_fractions         = micro.gas_fractions,
-                          characteristic_dimension_formula = characteristic_dim_formula)
-        Q_conv_d = uconvert(u"W", cd.convection_flow)
-        h_avg   += cd.heat_transfer_coefficient.combined
-    end
-    if A_v > 0u"m^2"
-        cv = convection(; body = body, area = A_v,
-                          air_temperature       = T_air,
-                          surface_temperature   = T_v_K,
-                          wind_speed            = V_air,
-                          atmospheric_pressure  = micro.atmospheric_pressure,
-                          fluid                 = Air(),
-                          gas_fractions         = micro.gas_fractions,
-                          characteristic_dimension_formula = characteristic_dim_formula)
-        Q_conv_v = uconvert(u"W", cv.convection_flow)
-        h_avg   += cv.heat_transfer_coefficient.combined
-    end
-    if A_d > 0u"m^2" && A_v > 0u"m^2"
-        h_avg /= 2
+    if convection_model isa PlateConvectionRegime
+        # Need an `AirProperties` block; build it from the microclimate
+        # if the caller did not provide one.  This is the slow path
+        # (re-derives gas properties per element); the snapshot driver
+        # passes a shared `air` argument to avoid the cost.
+        air_used = air === nothing ?
+                        air_properties(micro.air_temperature;
+                                       P = micro.atmospheric_pressure,
+                                       gas_fractions = micro.gas_fractions) :
+                        air
+        L  = elem.chord_length
+        Re = reynolds_number(V_air, L, air_used.ν)
+        h  = convection_h(convection_model, Re, air_used.Pr, air_used.k_air, L)
+        n_faces = 0
+        if A_d > 0u"m^2"
+            Q_conv_d = uconvert(u"W", h * A_d * (T_d_K - T_air))
+            h_avg   += h
+            n_faces += 1
+        end
+        if A_v > 0u"m^2"
+            Q_conv_v = uconvert(u"W", h * A_v * (T_v_K - T_air))
+            h_avg   += h
+            n_faces += 1
+        end
+        if n_faces == 2
+            h_avg /= 2
+        end
+    else
+        # HeatExchange.convection (package default — turbulent flat plate)
+        if A_d > 0u"m^2"
+            cd = convection(; body = body, area = A_d,
+                              air_temperature       = T_air,
+                              surface_temperature   = T_d_K,
+                              wind_speed            = V_air,
+                              atmospheric_pressure  = micro.atmospheric_pressure,
+                              fluid                 = Air(),
+                              gas_fractions         = micro.gas_fractions,
+                              characteristic_dimension_formula = characteristic_dim_formula)
+            Q_conv_d = uconvert(u"W", cd.convection_flow)
+            h_avg   += cd.heat_transfer_coefficient.combined
+        end
+        if A_v > 0u"m^2"
+            cv = convection(; body = body, area = A_v,
+                              air_temperature       = T_air,
+                              surface_temperature   = T_v_K,
+                              wind_speed            = V_air,
+                              atmospheric_pressure  = micro.atmospheric_pressure,
+                              fluid                 = Air(),
+                              gas_fractions         = micro.gas_fractions,
+                              characteristic_dimension_formula = characteristic_dim_formula)
+            Q_conv_v = uconvert(u"W", cv.convection_flow)
+            h_avg   += cv.heat_transfer_coefficient.combined
+        end
+        if A_d > 0u"m^2" && A_v > 0u"m^2"
+            h_avg /= 2
+        end
     end
 
     # ── Radiation: build the env structs HeatExchange expects ──────
@@ -457,7 +500,9 @@ function compute_heatbalance_snapshot(wd::WingDiscretization,
                                       view_factors::ViewFactors     = default_view_factors(),
                                       characteristic_dim_formula    = ScaledDimension(:length_skin),
                                       conduction_fraction::Real     = 0.0,
-                                      use_flat_plate_silhouette::Bool = true)
+                                      use_flat_plate_silhouette::Bool = true,
+                                      convection_model::Union{Nothing,PlateConvectionRegime} = nothing,
+                                      air::Union{Nothing,AirProperties} = nothing)
     n = length(wd.elements)
     elems = Vector{ElementHeatBalance}(undef, n)
     Q_conv = 0.0u"W"; Q_sol = 0.0u"W"
@@ -465,11 +510,19 @@ function compute_heatbalance_snapshot(wd::WingDiscretization,
 
     cosθ = max(cos(uconvert(u"rad", micro.zenith_angle)), 0.0)
 
+    # If using the analytic regime, compute the per-snapshot air
+    # properties once (they depend on micro only).
+    air_used = air
+    if convection_model isa PlateConvectionRegime && air_used === nothing
+        air_used = air_properties(micro.air_temperature;
+                                  P = micro.atmospheric_pressure,
+                                  gas_fractions = micro.gas_fractions)
+    end
+
     for i in 1:n
         elem = wd.elements[i]
         body = bodies[i]
         sil_override = if use_flat_plate_silhouette
-            # dorsal face area × cos(zenith) — a horizontal wing seen from the sun
             elem.dorsal_area * cosθ
         else
             nothing
@@ -484,6 +537,8 @@ function compute_heatbalance_snapshot(wd::WingDiscretization,
             characteristic_dim_formula = characteristic_dim_formula,
             conduction_fraction        = conduction_fraction,
             silhouette_area_override   = sil_override,
+            convection_model           = convection_model,
+            air                        = air_used,
         )
 
         Q_conv  += elems[i].Q_conv
@@ -509,19 +564,38 @@ function compute_wingbeat_heatbalance(kin::FlappingKinematics,
                                       wt::WingTemperatures,
                                       micro::Microclimate;
                                       n_steps::Int = 40,
-                                      V_forward                  = micro.wind_speed,
+                                      # Bird's forward flight speed (free-stream
+                                      # airspeed of the oncoming flow).  This is
+                                      # NOT the ambient `micro.wind_speed`; it is
+                                      # the speed at which the bird is travelling
+                                      # through the air (e.g. V_mr from the power
+                                      # model).  Default 0 = hovering, matching
+                                      # `compute_element_velocities`.
+                                      V_forward                  = 0.0u"m/s",
                                       tissue_density             = 1000.0u"kg/m^3",
                                       absorptivities::Absorptivities = default_absorptivities(),
                                       emissivities::Emissivities    = default_emissivities(),
                                       view_factors::ViewFactors     = default_view_factors(),
                                       characteristic_dim_formula    = ScaledDimension(:length_skin),
                                       conduction_fraction::Real     = 0.0,
-                                      use_flat_plate_silhouette::Bool = true)
+                                      use_flat_plate_silhouette::Bool = true,
+                                      convection_model::Union{Nothing,PlateConvectionRegime} = nothing)
     bodies = wing_bodies(wd; tissue_density = tissue_density)
 
     freq_Hz = isa(kin.frequency, Quantity) ? ustrip(u"Hz", kin.frequency) : kin.frequency
     period  = 1.0u"s" / freq_Hz
     times   = [(i - 1) * period / n_steps for i in 1:n_steps]
+
+    # Pre-compute the (micro-only) air properties once when an analytic
+    # convection regime is requested, so we don't re-derive gas mixture
+    # properties for every element/snapshot.
+    air_shared = if convection_model isa PlateConvectionRegime
+        air_properties(micro.air_temperature;
+                       P = micro.atmospheric_pressure,
+                       gas_fractions = micro.gas_fractions)
+    else
+        nothing
+    end
 
     snaps = Vector{WingHeatSnapshot}(undef, n_steps)
     for (j, t) in enumerate(times)
@@ -534,6 +608,8 @@ function compute_wingbeat_heatbalance(kin::FlappingKinematics,
             characteristic_dim_formula = characteristic_dim_formula,
             conduction_fraction        = conduction_fraction,
             use_flat_plate_silhouette  = use_flat_plate_silhouette,
+            convection_model           = convection_model,
+            air                        = air_shared,
         )
     end
 
@@ -574,6 +650,7 @@ both_wings(Q) = 2 * Q
 
 export WingTemperatures,
        AirProperties, air_properties,
+       PlateConvectionRegime, LaminarPlate, TurbulentPlate, MixedPlate,
        Microclimate, microclimate_at_altitude, microclimate_from_microresult,
        ElementHeatBalance, WingHeatSnapshot, WingbeatHeatBalance,
        uniform_temperature, linear_gradient, exponential_decay,

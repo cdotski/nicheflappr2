@@ -20,12 +20,18 @@
 # =====================================================================
 
 include("wing_heatbalance_2.0.jl")
+include("afpt.jl")
 
 module WingPower
 
 using ..WingPlates
 using ..WingKinematics
 using ..WingHeatBalance
+using ..WingHeatBalance: PlateConvectionRegime, LaminarPlate, TurbulentPlate, MixedPlate
+using ..AFPT
+using ..AFPT: AfptBird, build_afpt_bird, compute_flapping_power,
+              find_minimum_power_speed, find_maximum_range_speed,
+              compute_available_power, compute_flight_performance
 using Unitful
 using Printf
 
@@ -413,7 +419,7 @@ Run the full pipeline:
 function Q_for_mass(m_kg::Real;
                     # ── environment ─────────────────────────────────
                     T_air::Quantity        = 20.0u"°C",
-                    T_wing::Quantity       = 24.0u"°C",
+                    T_wing::Quantity       = 23.0u"°C",
                     altitude::Quantity     = 0.0u"m",
                     P                      = nothing,
                     temperatures_builder   = nothing,
@@ -457,7 +463,29 @@ function Q_for_mass(m_kg::Real;
                     # ── power-speed search ──────────────────────────
                     V_lo::Real             = 2.0,
                     V_hi::Real             = 50.0,
-                    V_n::Int               = 4001)
+                    V_n::Int               = 4001,
+                    # ── convection model ────────────────────────────
+                    # `nothing`          → HeatExchange.convection (turbulent
+                    #                       flat plate, package default)
+                    # PlateConvectionRegime → explicit Pohlhausen / fully
+                    #   turbulent / mixed correlation evaluated locally with
+                    #   the wing chord as the characteristic length.
+                    convection_model::Union{Nothing,PlateConvectionRegime} = MixedPlate(),
+                    # ── flight-power model ──────────────────────────
+                    # :simple → afpt-lite drag decomposition (no kD/kP)
+                    # :afpt   → full afpt model with strokeplane optimisation,
+                    #           flapping kD/kP corrections, muscle-power limit
+                    power_model::Symbol = :afpt,
+                    # afpt extras (only used when power_model = :afpt)
+                    massEmpty            = nothing,
+                    massFat::Real        = 0.0,
+                    massLoad::Real       = 0.0,
+                    muscleFraction::Real = 0.17,
+                    coef_activeStrain::Real    = 0.26,
+                    coef_isometricStress::Real = 400e3,
+                    maxPowerAero               = nothing,
+                    strokeplane = :opt,
+                    climbAngle::Real = 0.0)
     micro = microclimate === nothing ?
             Microclimate(; air_temperature      = T_air,
                            sky_temperature      = sky_temperature,
@@ -491,9 +519,71 @@ function Q_for_mass(m_kg::Real;
 
     bird = build_bird_from_mass(m_kg; bird_kwargs...)
 
-    V_mp = minimum_power_speed(bird; ρ = ρ, ν = ν, V_lo = V_lo, V_hi = V_hi, n = V_n)
-    V_mr = maximum_range_speed(bird; ρ = ρ, ν = ν, V_lo = V_lo, V_hi = V_hi, n = V_n)
-    P_mr = flapping_power(bird, V_mr; ρ = ρ, ν = ν)
+    # ── Characteristic flight speeds ─────────────────────────────────
+    # Two paths:
+    #   :simple  — current afpt-lite drag decomposition (no kD/kP);
+    #              cheap linear-grid search.
+    #   :afpt    — full afpt port with strokeplane optimisation, kD/kP
+    #              corrections, muscle-power limit.  Slower but matches
+    #              the upstream R package output exactly.
+    afpt_bird       = nothing
+    afpt_perf       = nothing
+    afpt_power_at_Vmr = nothing
+    if power_model === :afpt
+        m_empty_used = massEmpty === nothing ? m_kg : float(massEmpty)
+        afpt_bird = build_afpt_bird(m_kg, bird.wing_span;
+                                    wingArea           = bird.wing_area,
+                                    type               = type,
+                                    massEmpty          = m_empty_used,
+                                    massFat            = massFat,
+                                    massLoad           = massLoad,
+                                    bodyFrontalArea    = bird.body_frontal_area,
+                                    wingbeatFrequency  = bird.wingbeat_frequency,
+                                    basalMetabolicRate = bird.basal_metabolic_rate,
+                                    muscleFraction     = muscleFraction,
+                                    coef_profileDragLiftFactor = k_profile_lift,
+                                    coef_bodyDragCoefficient   = CD_body,
+                                    coef_conversionEfficiency  = conversion_efficiency,
+                                    coef_respirationFactor     = respiration_factor,
+                                    coef_activeStrain          = coef_activeStrain,
+                                    coef_isometricStress       = coef_isometricStress)
+
+        V_mp = find_minimum_power_speed(afpt_bird; V_lo = V_lo, V_hi = V_hi,
+                                        ρ = ρ, ν = ν,
+                                        strokeplane = strokeplane,
+                                        climbAngle  = climbAngle)
+        V_mr = find_maximum_range_speed(afpt_bird; V_lo = V_lo, V_hi = V_hi,
+                                        ρ = ρ, ν = ν,
+                                        strokeplane = strokeplane,
+                                        climbAngle  = climbAngle)
+        afpt_power_at_Vmr = compute_flapping_power(afpt_bird, V_mr;
+                                                   ρ = ρ, ν = ν,
+                                                   strokeplane = strokeplane,
+                                                   climbAngle  = climbAngle)
+        # Build a simple-style FlightPower record so downstream API stays the same
+        P_mr = FlightPower(
+            speed      = V_mr,
+            P_induced  = afpt_power_at_Vmr.power_ind,
+            P_profile0 = afpt_power_at_Vmr.power_pro0,
+            P_profile2 = afpt_power_at_Vmr.power_pro2,
+            P_parasite = afpt_power_at_Vmr.power_par,
+            P_mech     = afpt_power_at_Vmr.power_total,
+            P_chem     = afpt_power_at_Vmr.power_chem,
+            Re         = afpt_power_at_Vmr.ReynoldsNumber,
+            CDpro0     = afpt_power_at_Vmr.CDpro0,
+        )
+        # The cached flight-performance summary is computed lazily on
+        # the BirdScaling type below (one extra evaluation only when
+        # asked for).
+        afpt_perf = (V_mp = V_mp, V_mr = V_mr,
+                     P_avail = compute_available_power(afpt_bird;
+                                                      maxPowerAero = maxPowerAero),
+                     power_at_Vmr = afpt_power_at_Vmr)
+    else
+        V_mp = minimum_power_speed(bird; ρ = ρ, ν = ν, V_lo = V_lo, V_hi = V_hi, n = V_n)
+        V_mr = maximum_range_speed(bird; ρ = ρ, ν = ν, V_lo = V_lo, V_hi = V_hi, n = V_n)
+        P_mr = flapping_power(bird, V_mr; ρ = ρ, ν = ν)
+    end
 
     kin = build_kinematics_for_mass(m_kg, freq_method;
               amp = amp, stroke_plane_deg = stroke_plane_deg,
@@ -515,7 +605,8 @@ function Q_for_mass(m_kg::Real;
               V_forward      = V_mr * u"m/s",
               absorptivities = absorptivities,
               emissivities   = emissivities,
-              view_factors   = view_factors)
+              view_factors   = view_factors,
+              convection_model = convection_model)
 
     return BirdScaling(bird, wd, kin, air, wt, micro,
                        Float64(V_mr), Float64(V_mp), P_mr, wbh)
@@ -557,6 +648,7 @@ export Bird, FlightPower, BirdScaling,
        flapping_power, mech2chem, chem2mech,
        minimum_power_speed, maximum_range_speed,
        Q_for_mass, summarize,
+       PlateConvectionRegime, LaminarPlate, TurbulentPlate, MixedPlate,
        wingspan, wing_planform_area, wing_surface_area, mean_chord,
        frequency, Q_mean, Q_max, Q_min, q_density, ΔT,
        Q_conv_mean, Q_solar_mean, Q_lw_in_mean, Q_lw_out_mean,
