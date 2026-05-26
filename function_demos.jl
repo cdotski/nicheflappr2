@@ -17,9 +17,22 @@
 include("wing_power.jl")
 
 using .WingPlates, .WingKinematics, .WingHeatBalance, .WingPower
-using .AFPT: build_afpt_bird, compute_flight_performance
+using .AFPT: build_afpt_bird, compute_flight_performance,
+             compute_flapping_power, find_maximum_range_speed,
+             find_minimum_power_speed,
+             wing_span_allometry, wing_area_allometry
 using Unitful
 using Printf
+
+"""
+    quick_afpt_bird(m_kg; type = :other) → AfptBird
+
+Convenience helper used by the demos: build an `AfptBird` with the
+canonical afpt-style allometric span / area for body mass `m_kg`.
+"""
+quick_afpt_bird(m_kg::Real; type::Symbol = :other) =
+    build_afpt_bird(m_kg, wing_span_allometry(m_kg);
+                    wingArea = wing_area_allometry(m_kg), type = type)
 
 const _PLOTS_AVAILABLE = try
     @eval using Plots
@@ -62,10 +75,10 @@ let
     wd   = build_wing_for_mass(m_kg; n_elements = 10)
 
     # Strouhal frequency needs a forward airspeed — get V_mr from a
-    # quick bird build, then either pass V_forward_ms as a kwarg or
-    # bake it into the StrouhalFreq struct.
-    bird  = build_bird_from_mass(m_kg)
-    V_mr  = maximum_range_speed(bird)            # [m/s]
+    # quick AFPT bird build, then either pass V_forward_ms as a kwarg
+    # or bake it into the StrouhalFreq struct.
+    bird  = quick_afpt_bird(m_kg)
+    V_mr  = find_maximum_range_speed(bird)        # [m/s]
 
     kin  = build_kinematics_for_mass(m_kg, StrouhalFreq();
                                      amp = StrouhalAmplitude(), stroke_plane_deg = 80.0,
@@ -88,6 +101,53 @@ let
     # Alternative: bake U into the StrouhalFreq struct itself
     str = StrouhalFreq(0.21, 1.225, V_mr)
     @printf "Strouhal-based f = %.2f Hz (at U = %.2f m/s)\n" wingbeat_hz(m_kg, str) V_mr
+end
+
+
+# ─────────────────────────────────────────────────────────────────────
+# 2.1 Kinematics demo — AFPT-based (Pennycuick frequency + optimised
+#     strokeplane + afpt-consistent amplitude).  Mirrors Demo 2 so the
+#     two parameterisations can be compared side-by-side.
+# ─────────────────────────────────────────────────────────────────────
+let
+    println("\n=== 2.1 Kinematics (AFPT-based) =============================")
+
+    m_kg = 0.05
+    wd   = build_wing_for_mass(m_kg; n_elements = 10)
+
+    # Build the canonical afpt bird and solve its V_mr + flapping-power
+    # optimum.  The returned NamedTuple carries the optimised
+    # strokeplane angle and the kinematically-consistent amplitude that
+    # belong with afpt's `compute_flapping_power` minimum.
+    bird = quick_afpt_bird(m_kg)
+    V_mr = find_maximum_range_speed(bird)
+    res  = compute_flapping_power(bird, V_mr; strokeplane = :opt)
+
+    # AFPT-driven kinematics:
+    #   • frequency      → Pennycuick2008MinPower delegates to
+    #                      AFPT.estimate_frequency, the same `f` used by
+    #                      afpt's power model (bird.wingbeatFrequency).
+    #   • stroke plane   → optimum from compute_flapping_power.
+    #   • amplitude      → AfptOptAmplitude wraps the amplitude returned
+    #                      alongside that optimum (degrees).
+    kin = build_kinematics_for_mass(m_kg, Pennycuick2008MinPower();
+                                    amp              = AfptOptAmplitude(res.amplitude),
+                                    stroke_plane_deg = res.strokeplane)
+
+    @printf "V_mr = %.2f m/s,  f = %.2f Hz, amplitude = %.1f°, φ_opt = %.1f°\n" V_mr ustrip(u"Hz", kin.frequency) rad2deg(kin.amplitude) res.strokeplane
+    @printf "kf   = %.3f,  T/L = %.3f\n" res.kf res.ToverL
+
+    ev = compute_element_velocities(kin, wd, 0.01u"s"; V_forward = V_mr * u"m/s")
+    @printf "v_tip = %s (realised)\n" ev.realised_airspeed[end]
+
+    if _PLOTS_AVAILABLE
+        ts = range(0u"s", uconvert(u"s", 1/kin.frequency); length = 200)
+        vs = [ustrip(u"m/s", realised_airspeed(kin, wd.elements[end].span_position, t;
+                                               V_forward = V_mr * u"m/s")) for t in ts]
+        display(plot(ustrip.(u"s", ts), vs;
+                     xlabel = "t [s]", ylabel = "tip speed [m/s]",
+                     title  = "Tip airspeed over wingbeat (AFPT kinematics)"))
+    end
 end
 
 
@@ -131,8 +191,8 @@ let
     println("\n=== 5. Wing heat balance (single microclimate) ==============")
 
     m_kg = 0.05
-    bird  = build_bird_from_mass(m_kg)
-    V_mr  = maximum_range_speed(bird)
+    bird  = quick_afpt_bird(m_kg)
+    V_mr  = find_maximum_range_speed(bird)
     wd   = build_wing_for_mass(m_kg; n_elements = 10)
     kin  = build_kinematics_for_mass(m_kg, StrouhalFreq(); amp = StrouhalAmplitude(),
                                      stroke_plane_deg = 80.0, V_forward_ms = V_mr)
@@ -166,11 +226,82 @@ end
 
 
 # ─────────────────────────────────────────────────────────────────────
-# 5b. Bird in several microclimates — radiation + convection pathways # NQR: 
+# 5.1 Convection-only comparison: AFPT kinematics vs Strouhal kinematics
+#
+# Minimal environment — T_air is fixed 3 °C below the wing.  Everything
+# else (radiation, microclimate) is omitted so the only heat-loss
+# pathway is forced convection.  Both kinematics parameterisations are
+# fed the same wing geometry, the same forward airspeed (V_mr from
+# AFPT) and the same wing temperature; the only differences are the
+# frequency, amplitude and stroke-plane angle.
+# ─────────────────────────────────────────────────────────────────────
+let
+    println("\n=== 5.1 Convection-only: AFPT vs Strouhal kinematics ========")
+
+    m_kg     = 0.05
+    T_wing   = 23.0u"°C"
+    ΔT       = 3.0u"K"                      # air is 3 °C cooler than the wing
+    T_air    = T_wing - ΔT
+
+    # Shared inputs ----------------------------------------------------
+    wd   = build_wing_for_mass(m_kg; n_elements = 10)
+    wt   = uniform_temperature(wd, T_wing)
+    air  = WingHeatBalance.air_properties(T_air)
+
+    bird = quick_afpt_bird(m_kg)
+    V_mr = find_maximum_range_speed(bird)
+    res  = compute_flapping_power(bird, V_mr; strokeplane = :opt)
+
+    # AFPT kinematics: Pennycuick freq + afpt-optimised φ + paired amp
+    kin_afpt = build_kinematics_for_mass(m_kg, Pennycuick2008MinPower();
+                                         amp              = AfptOptAmplitude(res.amplitude),
+                                         stroke_plane_deg = res.strokeplane)
+
+    # Strouhal kinematics with the previously-assumed φ = 80°
+    kin_str  = build_kinematics_for_mass(m_kg, StrouhalFreq();
+                                         amp              = StrouhalAmplitude(),
+                                         stroke_plane_deg = 80.0,
+                                         V_forward_ms     = V_mr)
+
+    # Cycle-averaged convection on each kinematics set ----------------
+    conv_afpt = compute_wingbeat_convection(kin_afpt, wd, wt, air;
+                                            n_steps = 40, V_forward = V_mr * u"m/s")
+    conv_str  = compute_wingbeat_convection(kin_str,  wd, wt, air;
+                                            n_steps = 40, V_forward = V_mr * u"m/s")
+
+    # Strip units once for the table
+    Q_afpt = ustrip(u"W", conv_afpt.Q_mean)
+    Q_str  = ustrip(u"W", conv_str.Q_mean)
+    f_afpt = ustrip(u"Hz", kin_afpt.frequency)
+    f_str  = ustrip(u"Hz", kin_str.frequency)
+    A_afpt = rad2deg(kin_afpt.amplitude)
+    A_str  = rad2deg(kin_str.amplitude)
+
+    @printf "%-12s %8s %8s %8s %10s %10s %10s\n" "kinematics" "f [Hz]" "amp[°]" "φ [°]" "Q̄_conv[W]" "Q_max[W]" "Q_min[W]"
+    println("─"^72)
+    @printf "%-12s %8.2f %8.1f %8.1f %10.4f %10.4f %10.4f\n" "AFPT"     f_afpt A_afpt res.strokeplane Q_afpt ustrip(u"W", conv_afpt.Q_max) ustrip(u"W", conv_afpt.Q_min)
+    @printf "%-12s %8.2f %8.1f %8.1f %10.4f %10.4f %10.4f\n" "Strouhal" f_str  A_str  80.0            Q_str  ustrip(u"W", conv_str.Q_max)  ustrip(u"W", conv_str.Q_min)
+    println("─"^72)
+    @printf "Δ (AFPT − Strouhal) = %+.4f W  (%+.1f %% relative to Strouhal)\n" (Q_afpt - Q_str) 100*(Q_afpt - Q_str)/Q_str
+    @printf "Same V_forward = %.2f m/s,  ΔT = %.1f K,  one wing only.\n" V_mr ustrip(u"K", ΔT)
+
+    if _PLOTS_AVAILABLE
+        ts_a = ustrip.(u"s", conv_afpt.times)
+        ts_s = ustrip.(u"s", conv_str.times)
+        display(plot(ts_a, ustrip.(u"W", conv_afpt.Q_timeseries);
+                     label = "AFPT",     xlabel = "t [s]", ylabel = "Q_conv [W]",
+                     title  = "Convective loss over one wingbeat"))
+        plot!(ts_s, ustrip.(u"W", conv_str.Q_timeseries);  label = "Strouhal")
+    end
+end
+
+
+# ─────────────────────────────────────────────────────────────────────
+# 5c. Bird in several microclimates — radiation + convection pathways # NQR:
 # the airspeed etc. plugs in weird
 # ─────────────────────────────────────────────────────────────────────
 let
-    println("\n=== 5b. Microclimate scenarios ==============================")
+    println("\n=== 5c. Microclimate scenarios ==============================")
 
     scenarios = [
         ("Desert midday",       Microclimate(air_temperature = 38.0u"°C",
@@ -214,14 +345,15 @@ let
     @printf "%-20s %-11s %-11s %-11s %-11s %-11s %-11s\n" "Scenario" "Q_conv" "Q_solar" "Q_lw,in" "Q_lw,out" "Q_net(1)" "Q_net(2)"
     println("─"^96)
     for (name, micro) in scenarios
+        # NOTE: omitting `amp` and `stroke_plane_deg` so the afpt-
+        # optimised values (from compute_flapping_power at V_mr)
+        # propagate into the kinematics.
         b = Q_for_mass(m_kg;
                        T_air  = micro.air_temperature,
                        T_wing = 35.0u"°C",
                        altitude = micro.altitude,
                        microclimate = micro,
                        n_elements = 10, n_steps = 40,
-                       amp = StrouhalAmplitude(),
-                       stroke_plane_deg = 80.0,
                        freq_method = StrouhalFreq())
         Qc = ustrip(u"W", Q_conv_mean(b))
         Qs = ustrip(u"W", Q_solar_mean(b))
@@ -239,19 +371,19 @@ end
 let
     println("\n=== 6. Flight-power curve ===================================")
 
-    bird = build_bird_from_mass(0.05; type = :passerine)
-    @printf "Built bird: m = %.3f kg, b = %.3f m, S = %.4f m², BMR = %.3f W\n" bird.mass_total bird.wing_span bird.wing_area bird.basal_metabolic_rate
+    bird = quick_afpt_bird(0.05; type = :passerine)
+    @printf "Built bird: m = %.3f kg, b = %.3f m, S = %.4f m², BMR = %.3f W\n" bird.massTotal bird.wingSpan bird.wingArea bird.basalMetabolicRate
 
-    V_mp = minimum_power_speed(bird)
-    V_mr = maximum_range_speed(bird)
+    V_mp = find_minimum_power_speed(bird)
+    V_mr = find_maximum_range_speed(bird)
     @printf "V_mp = %.2f m/s,  V_mr = %.2f m/s\n" V_mp V_mr
 
     if _PLOTS_AVAILABLE
         Vs = range(0.5, 30.0; length = 200)
-        Ps = [flapping_power(bird, V).P_mech for V in Vs]
+        Ps = [compute_flapping_power(bird, V).power_total for V in Vs]
         display(plot(collect(Vs), Ps;
                      xlabel = "V [m/s]", ylabel = "P_mech [W]",
-                     title  = "Mechanical flight power"))
+                     title  = "Mechanical flight power (afpt)"))
     end
 end
 
@@ -283,17 +415,16 @@ let
         @printf "%-22s %-7s %-7s %-9s %-9s\n" "Bird" "m[kg]" "V_mr" "Q[W]" "q[W/m²]"
         println("─"^60)
         for (nm, m) in demo_birds
+            # `amp` and `stroke_plane_deg` are omitted so the afpt-
+            # optimised values propagate from compute_flapping_power.
             b = Q_for_mass(m;
                            T_air  = 20.0u"°C",
                            T_wing = 23.0u"°C",
                            altitude = 0.0u"m",
                            n_elements = 10,
                            n_steps    = 40,
-                           amp        = StrouhalAmplitude(),
-                           stroke_plane_deg = 80.0,
                            freq_method = StrouhalFreq(),
-                           convection_model = mode,
-                           power_model = :afpt)
+                           convection_model = mode)
             s = summarize(b)
             @printf "%-22s %-7.4f %-7.2f %-9.4f %-9.2f\n" nm s.m_kg s.V_mr s.Q_mean_W s.q_per_m2
         end
@@ -376,8 +507,6 @@ let
                    zenith_angle    = Z * u"°",
                    relative_humidity = RH,
                    n_elements = 8, n_steps = 24,
-                   amp = StrouhalAmplitude(),
-                   stroke_plane_deg = 80.0,
                    freq_method = StrouhalFreq())
     end
 
@@ -437,8 +566,8 @@ let
 
     if use_scaled
         wd    = build_wing_for_mass(m_kg; n_elements = n_elements)
-        bird  = build_bird_from_mass(m_kg)
-        V_mr  = maximum_range_speed(bird)
+        bird  = quick_afpt_bird(m_kg)
+        V_mr  = find_maximum_range_speed(bird)
         kin   = build_kinematics_for_mass(m_kg, StrouhalFreq();
                                           amp = StrouhalAmplitude(),
                                           stroke_plane_deg = 80.0,
@@ -519,8 +648,8 @@ let
     grid = lift(s_m.value) do mg
         m_kg = mg / 1000
         wd   = build_wing_for_mass(m_kg; n_elements = n_elements)
-        bird = build_bird_from_mass(m_kg)
-        V_mr = maximum_range_speed(bird)
+        bird = quick_afpt_bird(m_kg)
+        V_mr = find_maximum_range_speed(bird)
         kin  = build_kinematics_for_mass(m_kg, StrouhalFreq();
                                          amp = StrouhalAmplitude(),
                                          stroke_plane_deg = 80.0,

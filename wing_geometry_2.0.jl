@@ -16,6 +16,9 @@ module WingPlates
 
 using Printf
 using Unitful
+using ..AFPT: wing_span_allometry, wing_area_allometry,
+              mean_chord_allometry, aspect_ratio_allometry,
+              compute_body_frontal_area
 
 # ── Allometry constants ─────────────────────────────────────────────
 #
@@ -200,34 +203,41 @@ end
 # Allometric scaling helpers
 # ═════════════════════════════════════════════════════════════════════
 #
-# All inputs are plain Float64 in kg / m; outputs are plain Float64 too,
-# to keep allometry independent of Unitful (units are reattached at the
+# These are thin wrappers around the canonical formulas in `AFPT`
+# (see `afpt.jl` → `wing_span_allometry`, `wing_area_allometry`,
+# `mean_chord_allometry`, `aspect_ratio_allometry`,
+# `compute_body_frontal_area`).  Keeping the public names here for
+# back-compatibility — the numerical formulas live in one place.
+#
+# All inputs are plain Float64 in kg; outputs are plain Float64 too,
+# so allometry is independent of Unitful (units are reattached at the
 # call site where needed).
 # ─────────────────────────────────────────────────────────────────────
 
-"Full wing span [m] from body mass [kg] (Pennycuick 2008)."
-wing_span_m(m_kg::Real)     = 1.17 * m_kg^0.39
+"Full wing span [m] from body mass [kg] (Pennycuick 2008).  Wrapper for `AFPT.wing_span_allometry`."
+wing_span_m(m_kg::Real)     = wing_span_allometry(m_kg)
 
-"Total wing area [m²] (both wings) from body mass [kg] (Pennycuick 2008)."
-wing_area_m2(m_kg::Real)    = 0.16 * m_kg^0.72
+"Total wing area [m²] (both wings) from body mass [kg] (Pennycuick 2008).  Wrapper for `AFPT.wing_area_allometry`."
+wing_area_m2(m_kg::Real)    = wing_area_allometry(m_kg)
 
-"Mean chord [m]: c̄ = S / b."
-mean_chord_m(m_kg::Real)    = wing_area_m2(m_kg) / wing_span_m(m_kg)
+"Mean chord [m]: c̄ = S/b.  Wrapper for `AFPT.mean_chord_allometry`."
+mean_chord_m(m_kg::Real)    = mean_chord_allometry(m_kg)
 
-"Aspect ratio AR = b² / S."
-aspect_ratio(m_kg::Real)    = wing_span_m(m_kg)^2 / wing_area_m2(m_kg)
+"Aspect ratio AR = b²/S.  Wrapper for `AFPT.aspect_ratio_allometry`."
+aspect_ratio(m_kg::Real)    = aspect_ratio_allometry(m_kg)
 
 """
     body_frontal_m2(m_kg; type = :other) → Float64
 
 Body frontal area [m²] for a bird of body mass `m_kg` [kg].
-`type` may be `:passerine` (Pennycuick 1989: 0.0129·m^0.614) or
-`:other` (default, 0.00813·m^0.666).
+Wrapper for `AFPT.compute_body_frontal_area` (allometry from
+afpt-r `computeBodyFrontalArea.R`):
+
+  * `:passerine` → 0.0129 · m^0.614
+  * otherwise    → 0.00813 · m^0.666
 """
-function body_frontal_m2(m_kg::Real; type::Symbol = :other)
-    return type == :passerine ? 0.0129 * m_kg^0.614 :
-                                 0.00813 * m_kg^0.666
-end
+body_frontal_m2(m_kg::Real; type::Symbol = :other) =
+    compute_body_frontal_area(m_kg, type)
 
 
 """

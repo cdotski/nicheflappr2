@@ -20,6 +20,8 @@ include("wing_geometry_2.0.jl")
 module WingKinematics
 
 using ..WingPlates
+using ..AFPT: estimate_frequency as _afpt_estimate_frequency,
+              reduced_frequency as _afpt_reduced_frequency
 using Unitful
 
 
@@ -119,9 +121,12 @@ wingbeat_hz(m_kg, ::Bulleen2012Bats) = 3.06 * m_kg^(-0.264)
 wingbeat_hz(m_kg, ::Rayner1988Birds) = 3.98 * m_kg^(-0.27)
 
 function wingbeat_hz(m_kg, method::Pennycuick2008MinPower)
+    # Delegate to AFPT.estimate_frequency (canonical implementation of
+    # afpt-r's .estimateFrequency, which uses the Pennycuick 2008
+    # allometric span and area).
     b = wing_span_m(m_kg)
     S = wing_area_m2(m_kg)
-    return m_kg^(3/8) * sqrt(G_MS2) * b^(-23/24) * S^(-1/3) * method.ρ_kgm3^(-3/8)
+    return _afpt_estimate_frequency(m_kg, b, S; ρ = method.ρ_kgm3, g = G_MS2)
 end
 
 """
@@ -164,11 +169,28 @@ struct WingspanScaling <: AmpScaling end
 """
 struct StrouhalAmplitude <: AmpScaling end
 
+"""
+    AfptOptAmplitude(amplitude_deg)
+
+Stroke half-amplitude obtained from the afpt power-minimisation
+solution (`AFPT.amplitude_afpt(kf, φ, T/L)` evaluated at the
+power-minimised state).  The value is stored in degrees so the rest
+of the kinematics pipeline can treat it identically to the other
+`AmpScaling` variants.
+
+Construct via `AfptOptAmplitude(result.amplitude)` where `result`
+comes from `AFPT.compute_flapping_power(...; strokeplane = :opt)`.
+"""
+struct AfptOptAmplitude <: AmpScaling
+    amplitude_deg::Float64
+end
+
 amplitude_deg(m_kg::Real, a::FixedAmplitude)    = a.deg
 amplitude_deg(m_kg::Real, ::WingspanScaling)    =
     10^(1.83 - 0.24 * log10(wing_span_m(m_kg)))
 amplitude_deg(m_kg::Real, ::StrouhalAmplitude)  =
     33.5 * wing_span_m(m_kg)^(-0.24)
+amplitude_deg(m_kg::Real, a::AfptOptAmplitude)  = a.amplitude_deg
 amplitude_deg(m_kg::Real, deg::Real)            = Float64(deg)
 
 
@@ -179,6 +201,7 @@ export FlappingKinematics, ElementVelocities,
        FreqScaling, Greenewalt1975, Pennycuick2008MinPower,
        Bulleen2012Bats, Rayner1988Birds, StrouhalFreq,
        AmpScaling, FixedAmplitude, WingspanScaling, StrouhalAmplitude,
+       AfptOptAmplitude,
        wingbeat_hz, amplitude_deg,
        build_kinematics_for_mass
 
@@ -296,14 +319,19 @@ end
     reduced_frequency(b, f, U) → Float64
 
 Reduced (Strouhal-style) frequency used by afpt:
-    k_f = 2π · f · b / U
-where `b` is wingspan and `U` is flight speed.
+    k_f = π · b · f / U
+
+where `b` is wingspan and `U` is flight speed.  This matches the afpt-r
+convention used by `FLAPPINGMODELCOEFFS`.  Earlier versions of this
+module used `2π·f·b/U` (factor-of-2 different) — that has been
+corrected here, and the function now delegates directly to
+`AFPT.reduced_frequency`.
 """
 function reduced_frequency(b, f, U)
     b_m = isa(b, Quantity) ? ustrip(u"m",   b) : b
     f_h = isa(f, Quantity) ? ustrip(u"Hz",  f) : f
     U_m = isa(U, Quantity) ? ustrip(u"m/s", U) : U
-    return 2π * f_h * b_m / U_m
+    return _afpt_reduced_frequency(b_m, f_h, U_m)
 end
 
 

@@ -648,17 +648,229 @@ by 2 for a paired-wing total.
 both_wings(Q) = 2 * Q
 
 
+# =====================================================================
+# Convection-only path (merged in from former WingConvection module)
+# ─────────────────────────────────────────────────────────────────────
+# These structs / drivers translate the realised wing-element airspeeds
+# (from `WingKinematics.compute_element_velocities`) into convective
+# heat fluxes — *without* the radiation/solar pathways used by the
+# full heat-balance.  Useful when you only need the convective loss
+# at one instant or averaged over the wingbeat, e.g. for an isolated
+# convection diagnostic plot.
+#
+# The full radiative + convective balance lives above
+# (`compute_heatbalance_snapshot` / `compute_wingbeat_heatbalance`).
+# =====================================================================
+
+"""
+    ElementConvection
+
+Convective heat-transfer state for one plate element at one instant
+(no radiation).
+"""
+@kwdef struct ElementConvection{L<:Unitful.Length, V<:Unitful.Velocity, P<:Quantity}
+    element_id::Int
+    span_position::L
+    chord::L
+    airspeed::V             # realised airspeed = sqrt((v·cosβ + V_fwd)² + (v·sinβ)²)
+    Re::Float64
+    Nu::Float64
+    h::Quantity             # heat-transfer coefficient [W/(m²·K)]
+    ΔT_dorsal::P            # T_d − T_air [K]
+    ΔT_ventral::P
+    Q_dorsal::Quantity      # convective flux out of dorsal face [W]
+    Q_ventral::Quantity
+    Q_total::Quantity       # dorsal + ventral
+    dorsal_area::Quantity
+    ventral_area::Quantity
+end
+
+"""
+    ConvectionSnapshot
+
+Whole-wing convection at a single instant.
+"""
+@kwdef struct ConvectionSnapshot{T<:Quantity}
+    t::Quantity
+    elements::Vector{<:ElementConvection}
+    Q_dorsal_total::T
+    Q_ventral_total::T
+    Q_total::T
+end
+
+"""
+    WingbeatConvection
+
+Cycle-resolved convection plus summary statistics.
+"""
+@kwdef struct WingbeatConvection{TT<:Unitful.Time, TQ<:Unitful.Power}
+    period::TT
+    n_steps::Int
+    snapshots::Vector{<:ConvectionSnapshot}
+    times::Vector{TT}
+    Q_timeseries::Vector{TQ}
+    Q_mean::TQ
+    Q_max::TQ
+    Q_min::TQ
+    Q_dorsal_mean::TQ
+    Q_ventral_mean::TQ
+    element_Q_mean::Vector{TQ}
+end
+
+"""
+    heat_transfer_coeff(Nu, k_air, L) → Quantity [W/(m²·K)]
+
+Compute h = Nu · k_air / L.  Backward-compat wrapper kept from the
+former `WingConvection` module; equivalent to
+`ConvectionRegimes.convection_h` once you know the Nu directly.
+"""
+function heat_transfer_coeff(Nu::Real, k_air, L)
+    k_num = isa(k_air, Quantity) ? ustrip(u"W/(m*K)", k_air) : k_air
+    L_num = isa(L,     Quantity) ? ustrip(u"m",       L)     : L
+    return (Nu * k_num / L_num) * u"W/(m^2*K)"
+end
+
+"""
+    compute_convection_snapshot(wd, ev, wt, air;
+                                regime = LaminarPlate()) → ConvectionSnapshot
+
+Per-element convective heat transfer for one instant in the wingbeat.
+Uses each element's chord as the characteristic length and the
+realised airspeed (combined flapping + forward, through the stroke
+plane) stored in `ev.realised_airspeed`.
+"""
+function compute_convection_snapshot(wd::WingDiscretization,
+                                     ev::ElementVelocities,
+                                     wt::WingTemperatures,
+                                     air::AirProperties;
+                                     regime::PlateConvectionRegime = LaminarPlate())
+    n = length(wd.elements)
+    elems = Vector{ElementConvection}(undef, n)
+    Q_d_total = 0.0u"W"; Q_v_total = 0.0u"W"
+
+    T_air_C = isa(air.T_air, Quantity) ? uconvert(u"°C", air.T_air) : air.T_air * u"°C"
+
+    for i in 1:n
+        elem  = wd.elements[i]
+        V     = ev.realised_airspeed[i]
+        chord = elem.chord_length
+
+        Re = reynolds_number(V, chord, air.ν)
+        Nu = nusselt_plate(regime, Re, air.Pr)
+        h  = heat_transfer_coeff(Nu, air.k_air, chord)
+
+        T_d_C = isa(wt.T_dorsal[i],  Quantity) ? uconvert(u"°C", wt.T_dorsal[i])  : wt.T_dorsal[i]  * u"°C"
+        T_v_C = isa(wt.T_ventral[i], Quantity) ? uconvert(u"°C", wt.T_ventral[i]) : wt.T_ventral[i] * u"°C"
+        # Subtract in °C to avoid affine-temperature arithmetic;
+        # the difference itself has units of K.
+        ΔT_d = ustrip(u"°C", T_d_C) - ustrip(u"°C", T_air_C)
+        ΔT_v = ustrip(u"°C", T_v_C) - ustrip(u"°C", T_air_C)
+
+        A_d = elem.has_dorsal  ? elem.dorsal_area  : 0.0u"m^2"
+        A_v = elem.has_ventral ? elem.ventral_area : 0.0u"m^2"
+
+        Q_d = uconvert(u"W", h * A_d * ΔT_d * u"K")
+        Q_v = uconvert(u"W", h * A_v * ΔT_v * u"K")
+
+        elems[i] = ElementConvection(
+            element_id    = elem.element_id,
+            span_position = elem.span_position,
+            chord         = chord,
+            airspeed      = V,
+            Re            = Re,
+            Nu            = Nu,
+            h             = h,
+            ΔT_dorsal     = ΔT_d * u"K",
+            ΔT_ventral    = ΔT_v * u"K",
+            Q_dorsal      = Q_d,
+            Q_ventral     = Q_v,
+            Q_total       = Q_d + Q_v,
+            dorsal_area   = A_d,
+            ventral_area  = A_v,
+        )
+
+        Q_d_total = uconvert(u"W", Q_d_total + Q_d)
+        Q_v_total = uconvert(u"W", Q_v_total + Q_v)
+    end
+
+    return ConvectionSnapshot(
+        t               = ev.t,
+        elements        = elems,
+        Q_dorsal_total  = Q_d_total,
+        Q_ventral_total = Q_v_total,
+        Q_total         = Q_d_total + Q_v_total,
+    )
+end
+
+"""
+    compute_wingbeat_convection(kin, wd, wt, air;
+                                n_steps = 50, V_forward = 0u"m/s",
+                                regime = LaminarPlate()) → WingbeatConvection
+
+Cycle-averaged convective heat loss.  Steps through `n_steps` instants
+across one wingbeat period, computes the per-element velocities (with
+the supplied forward airspeed), and aggregates per-element / per-
+surface fluxes.
+"""
+function compute_wingbeat_convection(kin::FlappingKinematics,
+                                     wd::WingDiscretization,
+                                     wt::WingTemperatures,
+                                     air::AirProperties;
+                                     n_steps::Int = 50,
+                                     V_forward = 0.0u"m/s",
+                                     regime::PlateConvectionRegime = LaminarPlate())
+    freq_Hz = isa(kin.frequency, Quantity) ? ustrip(u"Hz", kin.frequency) : kin.frequency
+    period  = 1.0u"s" / freq_Hz
+    times   = [(i - 1) * period / n_steps for i in 1:n_steps]
+
+    snapshots    = Vector{ConvectionSnapshot}(undef, n_steps)
+    Q_timeseries = Vector{typeof(1.0u"W")}(undef, n_steps)
+
+    for (j, t) in enumerate(times)
+        ev = compute_element_velocities(kin, wd, t, V_forward = V_forward)
+        snapshots[j]    = compute_convection_snapshot(wd, ev, wt, air; regime = regime)
+        Q_timeseries[j] = snapshots[j].Q_total
+    end
+
+    n_elem = length(wd.elements)
+    element_Q_mean = Vector{typeof(1.0u"W")}(undef, n_elem)
+    for i in 1:n_elem
+        element_Q_mean[i] = sum(snapshots[j].elements[i].Q_total for j in 1:n_steps) / n_steps
+    end
+
+    Q_dorsal_mean  = sum(s.Q_dorsal_total  for s in snapshots) / n_steps
+    Q_ventral_mean = sum(s.Q_ventral_total for s in snapshots) / n_steps
+
+    return WingbeatConvection(
+        period         = period,
+        n_steps        = n_steps,
+        snapshots      = snapshots,
+        times          = times,
+        Q_timeseries   = Q_timeseries,
+        Q_mean         = sum(Q_timeseries) / n_steps,
+        Q_max          = maximum(Q_timeseries),
+        Q_min          = minimum(Q_timeseries),
+        Q_dorsal_mean  = Q_dorsal_mean,
+        Q_ventral_mean = Q_ventral_mean,
+        element_Q_mean = element_Q_mean,
+    )
+end
+
+
 export WingTemperatures,
        AirProperties, air_properties,
        PlateConvectionRegime, LaminarPlate, TurbulentPlate, MixedPlate,
        Microclimate, microclimate_at_altitude, microclimate_from_microresult,
        ElementHeatBalance, WingHeatSnapshot, WingbeatHeatBalance,
+       ElementConvection, ConvectionSnapshot, WingbeatConvection,
        uniform_temperature, linear_gradient, exponential_decay,
        custom_per_element, from_function, dorsal_ventral_split,
        to_K, to_C,
        element_to_body, wing_bodies,
        element_heat_balance,
        compute_heatbalance_snapshot, compute_wingbeat_heatbalance,
+       compute_convection_snapshot, compute_wingbeat_convection,
+       heat_transfer_coeff,
        default_absorptivities, default_emissivities, default_view_factors,
        both_wings
 
