@@ -21,7 +21,7 @@
 # This module no longer carries a duplicated bird/drag/power model:
 # all flight aerodynamics now come from `AFPT` (the in-house port of
 # Klein Heerenbrink et al. 2015 / Pennycuick 2008).  The previous
-# `:simple` afpt-lite drag decomposition has been removed.
+# `:simple` afpt-lite drag decomposition has been removed. :)
 # =====================================================================
 
 include("afpt.jl")
