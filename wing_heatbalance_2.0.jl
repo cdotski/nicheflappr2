@@ -188,7 +188,15 @@ characteristic-dimension dispatch all match the strip.
 function element_to_body(elem::WingElement; tissue_density = 1000.0u"kg/m^3")
     L = elem.chord_length     # streamwise (long) dimension
     W = elem.span_length      # span-wise width of the strip
-    H = elem.thickness        # plate thickness
+
+    # Use a negligibly thin height so that BiophysicalGeometry.total_area ≈ 2·L·W
+    # (dorsal + ventral faces only).  The real `elem.thickness` is physically
+    # meaningful for structural mass, but for radiation HeatExchange.solar /
+    # radiation_in / radiation_out multiply `total_area` by the view factors.
+    # A true plate has edge area ≈ 0, so H → 0 is the correct limit.
+    # With thickness_factor = 0.05, H ≈ 0.05·L and the four edge panels add
+    # ~40 % to total_area, inflating Q_solar and Q_lw proportionally.
+    H = min(W, L) * 1e-4      # ≪ L and W; edges negligible
 
     V = L * W * H
     b = L / W
@@ -278,13 +286,44 @@ end
 # Per-element heat balance (delegates to HeatExchange)
 # =====================================================================
 
-const _DEFAULT_GROUND_ALBEDO   = 0.2
-const _DEFAULT_GROUND_EMISS    = 0.95
-const _DEFAULT_SKY_EMISS       = 0.95
-const _DEFAULT_BODY_ABS        = 0.85
-const _DEFAULT_BODY_EMISS      = 0.95
-const _DEFAULT_SKY_VF          = 0.5
-const _DEFAULT_GROUND_VF       = 0.5
+# ─────────────────────────────────────────────────────────────────
+# Default radiative properties — taken from the budgerigar example
+# in BiophysicalBehaviour.jl so we are consistent with the published
+# BiophysicalEcology defaults.  Sources:
+#
+#   • α_body_dorsal / α_body_ventral come from the budgerigar's
+#     `insulation_reflectance_*` fields in examples/budgerigar.jl
+#     (α = 1 − reflectance):
+#         insulation_reflectance_dorsal  = 0.248  →  α_d = 0.752
+#         insulation_reflectance_ventral = 0.351  →  α_v = 0.649
+#     https://github.com/BiophysicalEcology/BiophysicalBehaviour.jl/
+#         blob/main/examples/budgerigar.jl
+#
+#   • ϵ_body_dorsal, ϵ_body_ventral, F_sky, F_ground come from
+#     `example_radiation_pars` (the defaults the budgie example uses
+#     via `radiation_pars = example_radiation_pars()`):
+#         ϵ_body_dorsal  = 0.99,  ϵ_body_ventral = 0.99
+#         F_sky          = 0.5,   F_ground       = 0.5
+#     https://github.com/BiophysicalEcology/BiophysicalBehaviour.jl/
+#         blob/main/src/endotherm/example_variables_and_parameters.jl
+#
+#   • α_ground, ϵ_ground, ϵ_sky come from `example_environment_pars`:
+#         α_ground = 0.8   (ground SOLAR ABSORPTIVITY, so the ground
+#                          REFLECTS 1 − 0.8 = 0.20 of incoming solar —
+#                          the grass-like value).  Passed straight
+#                          into HeatExchange's `Absorptivities.ground`.
+#         ϵ_ground = 1.0,  ϵ_sky = 1.0
+#     (same file as above).
+# ─────────────────────────────────────────────────────────────────
+const _DEFAULT_BODY_ABS_DORSAL  = 0.752   # = 1 − 0.248 (budgie dorsal reflectance)
+const _DEFAULT_BODY_ABS_VENTRAL = 0.649   # = 1 − 0.351 (budgie ventral reflectance)
+const _DEFAULT_BODY_EMISS       = 0.99    # ϵ_body_dorsal = ϵ_body_ventral in example_radiation_pars
+const _DEFAULT_GROUND_ALBEDO    = 0.8     # ground SOLAR ABSORPTIVITY (NOT reflectance);
+                                          # matches example_environment_pars α_ground = 0.8
+const _DEFAULT_GROUND_EMISS     = 1.0     # example_environment_pars ϵ_ground = 1.0
+const _DEFAULT_SKY_EMISS        = 1.0     # example_environment_pars ϵ_sky    = 1.0
+const _DEFAULT_SKY_VF           = 0.5     # example_radiation_pars F_sky      = 0.5
+const _DEFAULT_GROUND_VF        = 0.5     # example_radiation_pars F_ground   = 0.5
 
 
 """
@@ -450,8 +489,8 @@ end
 """
     default_absorptivities(; α_d, α_v, α_ground) → HeatExchange.Absorptivities
 """
-default_absorptivities(; α_d = _DEFAULT_BODY_ABS,
-                          α_v = _DEFAULT_BODY_ABS,
+default_absorptivities(; α_d = _DEFAULT_BODY_ABS_DORSAL,
+                          α_v = _DEFAULT_BODY_ABS_VENTRAL,
                           α_ground = _DEFAULT_GROUND_ALBEDO) =
     Absorptivities(; body = DorsalVentral(α_d, α_v), ground = α_ground)
 

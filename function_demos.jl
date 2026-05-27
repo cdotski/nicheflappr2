@@ -66,10 +66,10 @@ end
 
 
 # ─────────────────────────────────────────────────────────────────────
-# 2. Kinematics demo
+# 2. Kinematics demo (strouhal based)
 # ─────────────────────────────────────────────────────────────────────
 let
-    println("\n=== 2. Kinematics + element velocities ======================")
+    println("\n=== 2. Kinematics + element velocities (strouhal based) ====")
 
     m_kg = 0.05
     wd   = build_wing_for_mass(m_kg; n_elements = 10)
@@ -186,32 +186,68 @@ end
 
 # ─────────────────────────────────────────────────────────────────────
 # 5. Full heat balance over one wingbeat (single microclimate)
+#
+# Same configuration as demo 5.3 (100 g bird, AFPT-driven kinematics —
+# Pennycuick freq + afpt-optimised amplitude + afpt-optimised stroke-
+# plane — MixedPlate convection, T_wing = T_air + 1.5 K, evaluated at
+# h = 30 m above ground), but driven through `Q_for_mass` for ONE
+# microclimate so the full per-wingbeat snapshot stack
+# (`b.heat.snapshots`, `b.heat.*_series`) is available for plotting.
 # ─────────────────────────────────────────────────────────────────────
 let
     println("\n=== 5. Wing heat balance (single microclimate) ==============")
 
-    m_kg = 0.05
-    bird  = quick_afpt_bird(m_kg)
-    V_mr  = find_maximum_range_speed(bird)
-    wd   = build_wing_for_mass(m_kg; n_elements = 10)
-    kin  = build_kinematics_for_mass(m_kg, StrouhalFreq(); amp = StrouhalAmplitude(),
-                                     stroke_plane_deg = 80.0, V_forward_ms = V_mr)
-    wt   = uniform_temperature(wd, 23.0u"°C")
-    micro = Microclimate(air_temperature  = 20.0u"°C",
-                         wind_speed       = V_mr * u"m/s",
-                         global_radiation = 600.0u"W/m^2",
-                         zenith_angle     = 30.0u"°")
+    m_kg   = 0.10
+    h_fly  = 30.0u"m"
+    T_wing = 40.0u"°C"     # absolute wing surface temperature
 
-    wbh = compute_wingbeat_heatbalance(kin, wd, wt, micro;
-                                       n_steps = 40, V_forward = V_mr * u"m/s")
+    micro = microclimate_at_altitude(altitude         = h_fly,
+                                     air_temperature    = 10.0u"°C",
+                                     ground_temperature = 25.0u"°C",
+                                     sky_temperature    =  5.0u"°C",
+                                     zenith_angle       = 10.0u"°",
+                                     global_radiation   = 500.0u"W/m^2",
+                                     diffuse_fraction   = 0.20,
+                                     relative_humidity  = 0.50)
 
-    @printf "Q_conv_mean   = %s\n" wbh.Q_conv_mean
-    @printf "Q_solar_mean  = %s\n" wbh.Q_solar_mean
-    @printf "Q_lw_in_mean  = %s\n" wbh.Q_lw_in_mean
-    @printf "Q_lw_out_mean = %s\n" wbh.Q_lw_out_mean
-    @printf "Q_lw_net_mean = %s\n" wbh.Q_lw_net_mean
-    @printf "Q_net_mean    = %s   (positive ⇒ net heating)\n" wbh.Q_net_mean
-    @printf "Both wings   Q_net = %s\n" WingHeatBalance.both_wings(wbh.Q_net_mean)
+    T_air = micro.air_temperature
+    ΔT_wa = uconvert(u"K", uconvert(u"K", T_wing) - uconvert(u"K", T_air))
+
+    # AFPT-driven kinematics (amp + φ left as nothing ⇒ Q_for_mass uses
+    # the afpt-optimised values).  Convection = MixedPlate (ours).
+    b = Q_for_mass(m_kg;
+                   T_air        = T_air,
+                   T_wing       = T_wing,
+                   altitude     = h_fly,
+                   microclimate = micro,
+                   n_elements   = 10, n_steps = 40,
+                   freq_method      = Pennycuick2008MinPower(),
+                   convection_model = MixedPlate())
+
+    wbh    = b.heatbalance # WingbeatHeatBalance with per-step series
+    s      = summarize(b)
+    A_one  = ustrip(u"m^2",
+                    b.wing_disc.total_dorsal_area +
+                    b.wing_disc.total_ventral_area)
+
+    @printf "m = %.0f g,  V_mr = %.2f m/s,  f = %.2f Hz,  amp = %.1f°,  φ = %.1f°\n" (m_kg*1000) s.V_mr s.f_Hz s.amp_deg s.sp_deg
+    @printf "h = %.1f m,  P = %.0f Pa,  T_air = %.1f °C,  T_wing = %.1f °C  (ΔT = %.1f K)\n" ustrip(u"m", h_fly) ustrip(u"Pa", micro.atmospheric_pressure) ustrip(u"°C", T_air) ustrip(u"°C", T_wing) ustrip(u"K", ΔT_wa)
+    @printf "A_one-wing(d+v) = %.4f m²\n\n" A_one
+
+    pathways = ("Q_conv", "Q_solar", "Q_lw_in", "Q_lw_out", "Q_lw_net", "Q_net")
+    vals     = (ustrip(u"W", wbh.Q_conv_mean),
+                ustrip(u"W", wbh.Q_solar_mean),
+                ustrip(u"W", wbh.Q_lw_in_mean),
+                ustrip(u"W", wbh.Q_lw_out_mean),
+                ustrip(u"W", wbh.Q_lw_net_mean),
+                ustrip(u"W", wbh.Q_net_mean))
+
+    @printf "   %-10s %12s %14s\n" "pathway" "Q [W]" "q [W/m²]"
+    println("   " * "─"^40)
+    for (lbl, q) in zip(pathways, vals)
+        @printf "   %-10s %+12.5f %+14.4f\n" lbl q (q / A_one)
+    end
+    @printf "\n   (positive Q_net ⇒ net heating; both wings  Q_net = %+10.5f W)\n" (2 * ustrip(u"W", wbh.Q_net_mean))
 
     if _PLOTS_AVAILABLE
         ts = ustrip.(u"s", wbh.times)
@@ -239,7 +275,7 @@ let
     println("\n=== 5.1 Convection-only: AFPT vs Strouhal kinematics ========")
 
     m_kg     = 0.05
-    T_wing   = 23.0u"°C"
+    T_wing   = 25.0u"°C"
     ΔT       = 3.0u"K"                      # air is 3 °C cooler than the wing
     T_air    = T_wing - ΔT
 
@@ -297,70 +333,177 @@ end
 
 
 # ─────────────────────────────────────────────────────────────────────
-# 5c. Bird in several microclimates — radiation + convection pathways # NQR:
-# the airspeed etc. plugs in weird
+# 5.3 Bird in several microclimates — sanity-check table of every
+#     heat-transfer pathway in raw W and surface-normalised W/m².
+#
+# Setup:
+#   • 100 g bird in level cruise at h = 30 m above ground (a realistic
+#     "in flight" reference height: above the rough surface boundary
+#     layer but low enough that ground IR / albedo still dominate the
+#     view-factor sums).  Atmospheric pressure / air density at 30 m
+#     are taken from `FluidProperties.atmospheric_pressure(30 m)`,
+#     which is what `microclimate_at_altitude` plumbs in and what
+#     `Q_for_mass` then uses for ρ, ν, the AFPT power solve, and the
+#     convection correlation.  At 30 m the change vs sea level is
+#     tiny (≈ 0.4 %), but the plumbing is now consistent with the
+#     Microclimate.jl / BiophysicalEcology convention of evaluating
+#     animal energy balance at a specified reference height rather
+#     than implicitly at z = 0.
+#   • Kinematics: full AFPT — frequency (Pennycuick2008MinPower, the
+#     same `f` afpt's power model uses), amplitude (AfptOptAmplitude
+#     from compute_flapping_power at V_mr) and stroke-plane angle
+#     (result_mr.strokeplane).  `Q_for_mass` plumbs these in by
+#     default when `amp` and `stroke_plane_deg` are left unset.
+#   • Wing surface is held 2.5 K warmer than ambient in every scenario.
+#   • `wind_speed` is omitted from each Microclimate: the convective
+#     heat-transfer driver here is the *realised* element-wise airspeed
+#     (forward V_mr + flapping), which is computed internally.  The
+#     microclimate wind field is not used by `compute_wingbeat_
+#     heatbalance` in this configuration.
+#
+# Where each pathway comes from:
+#
+#   Q_conv   ← our flat-plate regime (MixedPlate, from
+#              convection_regimes.jl).  `Q_for_mass` defaults
+#              `convection_model = MixedPlate()`, so the convective
+#              path uses Nu = 0.037·Re^0.8·Pr^(1/3) above a critical
+#              Re and Pohlhausen laminar below it, evaluated with
+#              h = Nu·k_air/L on each element with L = chord and
+#              Re = V_realised · chord / ν.  HeatExchange.convection
+#              is NOT used in this demo (the `convection_model
+#              isa PlateConvectionRegime` branch of
+#              `element_heat_balance` is taken instead).
+#              Sign: positive Q_conv ⇒ heat lost from wing to air.
+#
+#   Q_solar  ← HeatExchange.solar.  This returns three sub-streams
+#              that are summed into Q_solar:
+#                – solar_direct_flow     uses ONLY the dorsal
+#                  silhouette projected at the zenith angle
+#                  (silhouette_area_override = dorsal_area · cosθ,
+#                  set in compute_heatbalance_snapshot).  The
+#                  silhouette is computed once per element, NOT
+#                  separately for dorsal + ventral, so the direct-beam
+#                  absorbed power is not double-counted on the two
+#                  faces.
+#                – solar_sky_flow        diffuse from sky, weighted
+#                  by view_factors.sky (≈ 0.5 default) on the
+#                  total wing area.
+#                – solar_substrate_flow  ground-reflected, weighted
+#                  by view_factors.ground (≈ 0.5 default) and the
+#                  ground albedo on the total wing area.
+#              The diffuse + ground terms genuinely act on both faces
+#              (a wing seen from below catches ground-reflected light;
+#              a wing seen from above catches sky diffuse), and the
+#              view-factor split (0.5 / 0.5) is what prevents those
+#              from being double-counted either.
+#
+#   Q_lw_in  ← HeatExchange.radiation_in (ε·σ·A·(F_sky·T_sky⁴ +
+#              F_ground·T_ground⁴ + …)).
+#   Q_lw_out ← HeatExchange.radiation_out (ε·σ·T_surf⁴·A summed
+#              over dorsal + ventral faces).
+#   Q_lw_net = Q_lw_in − Q_lw_out          (positive = wing gains LW).
+#   Q_net    = Q_solar + Q_lw_net − Q_conv  (positive = net heating).
 # ─────────────────────────────────────────────────────────────────────
 let
-    println("\n=== 5c. Microclimate scenarios ==============================")
+    println("\n=== 5.3 Microclimate scenarios — pathway sanity table =======")
 
+    m_kg   = 0.10
+    h_fly  = 30.0u"m"      # flight reference height above ground
+    T_wing = 40.0u"°C"     # absolute wing surface temperature (held fixed
+                           # across all scenarios so radiative emission
+                           # T_wing⁴ is identical and the differences
+                           # come purely from the environment).
+
+    # Use `microclimate_at_altitude` so atmospheric_pressure is set
+    # from FluidProperties.atmospheric_pressure(h_fly); sky / ground
+    # radiative temperatures are surface-referenced and unchanged by
+    # 30 m of altitude.
     scenarios = [
-        ("Desert midday",       Microclimate(air_temperature = 38.0u"°C",
-                                              ground_temperature = 55.0u"°C",
-                                              sky_temperature = 15.0u"°C",
-                                              wind_speed = 3.0u"m/s",
-                                              zenith_angle = 10.0u"°",
-                                              global_radiation = 1050.0u"W/m^2",
-                                              diffuse_fraction = 0.10,
-                                              relative_humidity = 0.15)),
-        ("Temperate overcast",  Microclimate(air_temperature = 15.0u"°C",
-                                              ground_temperature = 14.0u"°C",
-                                              sky_temperature = 10.0u"°C",
-                                              wind_speed = 4.0u"m/s",
-                                              zenith_angle = 45.0u"°",
-                                              global_radiation = 200.0u"W/m^2",
-                                              diffuse_fraction = 0.85,
-                                              shade = 0.5,
-                                              relative_humidity = 0.85)),
-        ("Alpine cold",         Microclimate(air_temperature = -5.0u"°C",
-                                              ground_temperature = -2.0u"°C",
-                                              sky_temperature = -30.0u"°C",
-                                              wind_speed = 8.0u"m/s",
-                                              zenith_angle = 60.0u"°",
-                                              global_radiation = 700.0u"W/m^2",
-                                              diffuse_fraction = 0.25,
-                                              altitude = 3000.0u"m",
-                                              atmospheric_pressure = 70110.0u"Pa",
-                                              relative_humidity = 0.5)),
-        ("Night flight",        Microclimate(air_temperature = 10.0u"°C",
-                                              ground_temperature = 8.0u"°C",
-                                              sky_temperature = -10.0u"°C",
-                                              wind_speed = 2.0u"m/s",
-                                              zenith_angle = 90.0u"°",
-                                              global_radiation = 0.0u"W/m^2",
-                                              diffuse_fraction = 1.0,
-                                              relative_humidity = 0.7)),
+        ("Desert midday",  microclimate_at_altitude(altitude          = h_fly,
+                                                    air_temperature    = 38.0u"°C",
+                                                    ground_temperature = 55.0u"°C",
+                                                    sky_temperature    = 15.0u"°C",
+                                                    zenith_angle       = 10.0u"°",
+                                                    global_radiation   = 1050.0u"W/m^2",
+                                                    diffuse_fraction   = 0.10,
+                                                    relative_humidity  = 0.15)),
+
+        ("Temperate noon", microclimate_at_altitude(altitude          = h_fly,
+                                                    air_temperature    = 20.0u"°C",
+                                                    ground_temperature = 25.0u"°C",
+                                                    sky_temperature    =  0.0u"°C",
+                                                    zenith_angle       = 30.0u"°",
+                                                    global_radiation   = 800.0u"W/m^2",
+                                                    diffuse_fraction   = 0.20,
+                                                    relative_humidity  = 0.50)),
+
+        ("Overcast cool",  microclimate_at_altitude(altitude          = h_fly,
+                                                    air_temperature    = 12.0u"°C",
+                                                    ground_temperature = 12.0u"°C",
+                                                    sky_temperature    =  5.0u"°C",
+                                                    zenith_angle       = 45.0u"°",
+                                                    global_radiation   = 250.0u"W/m^2",
+                                                    diffuse_fraction   = 0.90,
+                                                    relative_humidity  = 0.85)),
+
+        ("Night flight",   microclimate_at_altitude(altitude          = h_fly,
+                                                    air_temperature    = 10.0u"°C",
+                                                    ground_temperature =  8.0u"°C",
+                                                    sky_temperature    = -10.0u"°C",
+                                                    zenith_angle       = 90.0u"°",
+                                                    global_radiation   = 0.0u"W/m^2",
+                                                    diffuse_fraction   = 1.0,
+                                                    relative_humidity  = 0.7)),
     ]
 
-    m_kg = 0.05
-    @printf "%-20s %-11s %-11s %-11s %-11s %-11s %-11s\n" "Scenario" "Q_conv" "Q_solar" "Q_lw,in" "Q_lw,out" "Q_net(1)" "Q_net(2)"
-    println("─"^96)
+    pathways = ("Q_conv", "Q_solar", "Q_lw_in", "Q_lw_out", "Q_lw_net", "Q_net")
+
     for (name, micro) in scenarios
-        # NOTE: omitting `amp` and `stroke_plane_deg` so the afpt-
-        # optimised values (from compute_flapping_power at V_mr)
-        # propagate into the kinematics.
+        T_air = micro.air_temperature
+        ΔT_wa = uconvert(u"K", uconvert(u"K", T_wing) - uconvert(u"K", T_air))
+
+        # Defaults: amp = nothing, stroke_plane_deg = nothing  ⇒  use
+        # the afpt-optimised amplitude + strokeplane from
+        # compute_flapping_power(bird, V_mr; strokeplane = :opt).
+        # freq_method      = Pennycuick2008MinPower() ⇒ same f afpt uses.
+        # convection_model = MixedPlate() (Q_for_mass default) ⇒ Q_conv
+        # comes from our convection_regimes.jl, NOT HeatExchange.
         b = Q_for_mass(m_kg;
-                       T_air  = micro.air_temperature,
-                       T_wing = 35.0u"°C",
-                       altitude = micro.altitude,
+                       T_air        = T_air,
+                       T_wing       = T_wing,
+                       altitude     = h_fly,
                        microclimate = micro,
-                       n_elements = 10, n_steps = 40,
-                       freq_method = StrouhalFreq())
-        Qc = ustrip(u"W", Q_conv_mean(b))
-        Qs = ustrip(u"W", Q_solar_mean(b))
+                       n_elements   = 10, n_steps = 40,
+                       freq_method      = Pennycuick2008MinPower(),
+                       convection_model = MixedPlate())
+
+        # One-wing surface area (dorsal + ventral) for the per-area
+        # normalisation; every pathway above is reported per single
+        # wing in raw W.
+        A_one  = ustrip(u"m^2",
+                        b.wing_disc.total_dorsal_area +
+                        b.wing_disc.total_ventral_area)
+        s      = summarize(b)
+        V_real = s.V_mr   # realised forward speed used by the heat balance
+
+        Qc  = ustrip(u"W", Q_conv_mean(b))
+        Qs  = ustrip(u"W", Q_solar_mean(b))
         Qli = ustrip(u"W", Q_lw_in_mean(b))
         Qlo = ustrip(u"W", Q_lw_out_mean(b))
+        Qln = ustrip(u"W", Q_lw_net_mean(b))
         Qn  = ustrip(u"W", Q_net_mean(b))
-        @printf "%-20s %+10.4f %+10.4f %+10.4f %+10.4f %+10.4f %+10.4f\n" name Qc Qs Qli Qlo Qn (2*Qn)
+        vals = (Qc, Qs, Qli, Qlo, Qln, Qn)
+
+        println()
+        @printf "── %s   (T_air = %.1f °C, T_wing = %.1f °C, ΔT = %.1f K,\n" name ustrip(u"°C", T_air) ustrip(u"°C", T_wing) ustrip(u"K", ΔT_wa)
+        @printf "      V_mr = %.2f m/s,  f = %.2f Hz,  amp = %.1f°,  φ = %.1f°,\n" V_real s.f_Hz s.amp_deg s.sp_deg
+        @printf "      h = %.1f m,  P = %.0f Pa,  A_one-wing(d+v) = %.4f m²)\n" ustrip(u"m", h_fly) ustrip(u"Pa", micro.atmospheric_pressure) A_one
+        @printf "   %-10s %12s %14s\n" "pathway" "Q [W]" "q [W/m²]"
+        println("   " * "─"^40)
+        for (lbl, q) in zip(pathways, vals)
+            @printf "   %-10s %+12.5f %+14.4f\n" lbl q (q / A_one)
+        end
+        @printf "   (Both wings  Q_net = %+10.5f W)\n" (2 * Qn)
     end
 end
 
