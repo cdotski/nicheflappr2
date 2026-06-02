@@ -199,10 +199,10 @@ let
 
     m_kg   = 0.10
     h_fly  = 30.0u"m"
-    T_wing = 40.0u"°C"     # absolute wing surface temperature
+    T_wing = 20.0u"°C"     # absolute wing surface temperature
 
     micro = microclimate_at_altitude(altitude         = h_fly,
-                                     air_temperature    = 10.0u"°C",
+                                     air_temperature    = 15.0u"°C",
                                      ground_temperature = 25.0u"°C",
                                      sky_temperature    =  5.0u"°C",
                                      zenith_angle       = 10.0u"°",
@@ -522,11 +522,29 @@ let
     @printf "V_mp = %.2f m/s,  V_mr = %.2f m/s\n" V_mp V_mr
 
     if _PLOTS_AVAILABLE
-        Vs = range(0.5, 30.0; length = 200)
-        Ps = [compute_flapping_power(bird, V).power_total for V in Vs]
-        display(plot(collect(Vs), Ps;
-                     xlabel = "V [m/s]", ylabel = "P_mech [W]",
-                     title  = "Mechanical flight power (afpt)"))
+        Vs      = range(0.5, 30.0; length = 200)
+        samples = [compute_flapping_power(bird, V) for V in Vs]
+
+        # afpt's flapping-power model is only validated in the forward-
+        # flight regime where the reduced frequency kf = π·b·f/V stays
+        # below ~6 and the airspeed exceeds ~2·v_ih (induced velocity
+        # in hover).  Below ~5 m/s for a 50 g passerine both flags trip
+        # and the kP_* / kD_* polynomial corrections are extrapolated
+        # well outside their fit range, producing a non-smooth bump.
+        # Mask those points so only the validated J-curve is drawn.
+        invalid(s) = s.flags.redFreqHi || s.flags.speedLo
+        Ps_valid   = [invalid(s) ? NaN : s.power_total for s in samples]
+        Ps_inv     = [invalid(s) ? s.power_total : NaN for s in samples]
+
+        plt = plot(collect(Vs), Ps_valid;
+                   label  = "valid (kf ≤ 6, V ≥ 2·v_ih)",
+                   xlabel = "V [m/s]", ylabel = "P_mech [W]",
+                   title  = "Mechanical flight power (afpt)", lw = 2)
+        plot!(plt, collect(Vs), Ps_inv;
+              label = "out of afpt validity", ls = :dash, color = :grey)
+        vline!(plt, [V_mp]; ls = :dot, color = :black, label = "V_mp")
+        vline!(plt, [V_mr]; ls = :dot, color = :red,   label = "V_mr")
+        display(plt)
     end
 end
 
@@ -566,7 +584,6 @@ let
                            altitude = 0.0u"m",
                            n_elements = 10,
                            n_steps    = 40,
-                           freq_method = StrouhalFreq(),
                            convection_model = mode)
             s = summarize(b)
             @printf "%-22s %-7.4f %-7.2f %-9.4f %-9.2f\n" nm s.m_kg s.V_mr s.Q_mean_W s.q_per_m2
