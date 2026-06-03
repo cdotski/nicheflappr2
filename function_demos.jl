@@ -17,6 +17,8 @@
 include("wing_power.jl")
 
 using .WingPlates, .WingKinematics, .WingHeatBalance, .WingPower
+using .BodyHeatBalance
+using .FlightEnvironment: Microclimate, microclimate_at_altitude
 using .AFPT: build_afpt_bird, compute_flight_performance,
              compute_flapping_power, find_maximum_range_speed,
              find_minimum_power_speed,
@@ -853,5 +855,296 @@ let
 
     display(fig)
 end
+
+
+# ─────────────────────────────────────────────────────────────────────
+# 11. Body thermoregulation — single 100 g bird in one microclimate
+# ─────────────────────────────────────────────────────────────────────
+# Uses the new BiophysicalBehaviour pipeline (`run_body_thermoregulation`):
+# builds an `Organism` (HeatExchangeTraits + BehavioralTraits) and runs
+# the rule-based sequential controller (piloerect → uncurl → vasodilate
+# → hyperthermia → pant → sweat) to find heat balance.
+# ─────────────────────────────────────────────────────────────────────
+let
+    using .WholeAnimalHeatBalance: run_whole_animal
+    println("\n=== 11. Body thermoregulation — single 100 g bird ============")
+
+    micro = microclimate_at_altitude(
+        altitude           = 30.0u"m",
+        air_temperature    = 15.0u"°C",
+        ground_temperature = 25.0u"°C",
+        sky_temperature    = 5.0u"°C",
+        zenith_angle       = 10.0u"°",
+        global_radiation   = 500.0u"W/m^2",
+        diffuse_fraction   = 0.20,
+        relative_humidity  = 0.50,
+    )
+
+    # Use V_air = 0.1 m/s as a "perched" reference (no flight)
+    r  = run_body_thermoregulation_for_mass(0.100, micro; V_air = 0.1u"m/s")
+    bb = r.bird
+    tr = r.endotherm_out.thermoregulation
+    ef = r.endotherm_out.energy_fluxes
+    mf = r.endotherm_out.mass_fluxes
+    mo = r.endotherm_out.morphology
+
+    @printf "  mass            = %6.1f g\n"      1000 * bb.m_kg
+    @printf "  axis ratio a/b  = %6.3f\n"        bb.axis_ratio
+    @printf "  feather depth   = %6.2f mm\n"     1000 * ustrip(u"m", bb.feather_depth)
+    @printf "  area_total      = %6.4f m²\n"     ustrip(u"m^2", mo.area_total)
+    println("  ─── temperatures [°C] ───────────────────────")
+    @printf "   T_core         = %6.2f\n" ustrip(u"°C", tr.T_core)
+    @printf "   T_skin         = %6.2f\n" ustrip(u"°C", tr.T_skin)
+    @printf "   T_insulation   = %6.2f\n" ustrip(u"°C", tr.T_insulation)
+    @printf "   T_lung         = %6.2f\n" ustrip(u"°C", tr.T_lung)
+    println("  ─── energy fluxes [W] ──────────────────────")
+    @printf "   Q_gen          = %+8.4f\n" ustrip(u"W", ef.Q_gen)
+    @printf "   Q_solar        = %+8.4f\n" ustrip(u"W", ef.Q_solar)
+    @printf "   Q_lw_in        = %+8.4f\n" ustrip(u"W", ef.Q_longwave_in)
+    @printf "   Q_lw_out       = %+8.4f\n" ustrip(u"W", ef.Q_longwave_out)
+    @printf "   Q_conv         = %+8.4f\n" ustrip(u"W", ef.Q_convection)
+    @printf "   Q_evap         = %+8.4f\n" ustrip(u"W", ef.Q_evaporation)
+    @printf "   balance        = %+8.4f\n" ustrip(u"W", ef.balance)
+    println("  ─── thermoreg / behaviour state ────────────")
+    @printf "   pant level     = %6.3f (1 = resting)\n" tr.pant
+    @printf "   skin_wetness   = %6.4f\n" tr.skin_wetness
+    @printf "   k_flesh        = %6.3f W/m/K\n" ustrip(u"W/m/K", tr.k_flesh)
+    println("  ─── mass fluxes ────────────────────────────")
+    @printf "   ventilation    = %8.4f L/h\n" 3600 * 1000 * ustrip(u"m^3/s", mf.V_air)
+    @printf "   evap water     = %8.4f mg/s\n" 1e6 * ustrip(u"kg/s", mf.m_evap)
+end
+
+
+# ─────────────────────────────────────────────────────────────────────
+# 12. Budgerigar-style 4-panel reproduction across air temperature
+# ─────────────────────────────────────────────────────────────────────
+# Sweeps T_air over the bird's tolerable range and plots:
+#   (a) metabolic heat production Q_gen
+#   (b) evaporative water loss
+#   (c) body temperatures (T_core / T_skin / T_insulation)
+#   (d) panting multiplier and minute ventilation
+# ─────────────────────────────────────────────────────────────────────
+let
+    println("\n=== 12. Budgie-style 4-panel: 34 g bird vs T_air =============")
+
+    base_micro(T_air_C) = microclimate_at_altitude(
+        altitude           = 30.0u"m",
+        air_temperature    = T_air_C * u"°C",
+        ground_temperature = (T_air_C + 5.0) * u"°C",
+        sky_temperature    = (T_air_C - 10.0) * u"°C",
+        zenith_angle       = 60.0u"°",
+        global_radiation   = 200.0u"W/m^2",
+        diffuse_fraction   = 0.30,
+        relative_humidity  = 0.30,
+        shade              = 1.0,           # shade out direct solar so the
+                                            # sweep is dominated by air temp
+    )
+
+    T_air_C = collect(range(-10.0, 45.0; length = 23))
+    bb      = build_body_for_mass(0.034)    # canonical budgie
+
+    n        = length(T_air_C)
+    Q_gen    = Vector{Float64}(undef, n)
+    m_evap   = Vector{Float64}(undef, n)
+    T_core   = Vector{Float64}(undef, n)
+    T_skin   = Vector{Float64}(undef, n)
+    T_insul  = Vector{Float64}(undef, n)
+    pant     = Vector{Float64}(undef, n)
+    vent     = Vector{Float64}(undef, n)
+
+    for (i, Ta) in enumerate(T_air_C)
+        # run_body_thermoregulation can warn at extreme temps; capture
+        # whatever result it returns (the controller exits gracefully
+        # at "all options exhausted" / "max_iterations exceeded").
+        r  = run_body_thermoregulation(bb, base_micro(Ta); V_air = 0.1u"m/s")
+        ef = r.endotherm_out.energy_fluxes
+        mf = r.endotherm_out.mass_fluxes
+        tr = r.endotherm_out.thermoregulation
+        Q_gen[i]   = ustrip(u"W",   ef.Q_gen)
+        m_evap[i]  = 1e6 * ustrip(u"kg/s", mf.m_evap)             # mg/s
+        T_core[i]  = ustrip(u"°C",  tr.T_core)
+        T_skin[i]  = ustrip(u"°C",  tr.T_skin)
+        T_insul[i] = ustrip(u"°C",  tr.T_insulation)
+        pant[i]    = tr.pant
+        vent[i]    = 60 * 1000 * ustrip(u"m^3/s", mf.V_air)        # L/min
+    end
+
+    if _PLOTS_AVAILABLE
+        p1 = Plots.plot(T_air_C, Q_gen;  xlabel = "T_air [°C]", ylabel = "Q_gen [W]",
+                        lw = 2, label = "Q_gen", title = "Metabolic heat production")
+        p2 = Plots.plot(T_air_C, m_evap; xlabel = "T_air [°C]", ylabel = "ṁ_evap [mg/s]",
+                        lw = 2, label = "evap water loss",
+                        title = "Total evaporative water loss")
+        p3 = Plots.plot(T_air_C, [T_core T_skin T_insul];
+                        xlabel = "T_air [°C]", ylabel = "T [°C]",
+                        lw = 2, label = ["T_core" "T_skin" "T_insulation"],
+                        title = "Body temperatures")
+        p4 = Plots.plot(T_air_C, pant;
+                        xlabel = "T_air [°C]", ylabel = "panting multiplier",
+                        lw = 2, label = "pant",
+                        title = "Panting & ventilation",
+                        legend = :topleft)
+        Plots.plot!(Plots.twinx(p4), T_air_C, vent;
+                    ylabel = "ventilation [L/min]", lw = 2, color = :red,
+                    label = "ventilation", legend = :topright)
+        display(Plots.plot(p1, p2, p3, p4; layout = (2, 2), size = (1000, 750)))
+    else
+        println("  T_air  Q_gen  m_evap  T_core  T_skin  T_insul  pant  vent")
+        for i in 1:2:n
+            @printf "  %5.1f  %5.3f  %6.3f  %6.2f  %6.2f  %6.2f  %5.2f  %6.3f\n" (
+                T_air_C[i]) Q_gen[i] m_evap[i] T_core[i] T_skin[i] T_insul[i] pant[i] vent[i]
+        end
+    end
+end
+
+
+# ─────────────────────────────────────────────────────────────────────
+# 13. Perched vs flying — same 34 g bird across temperature sweep
+# ─────────────────────────────────────────────────────────────────────
+# Compares:
+#   • perched   = run_body_thermoregulation (V_air = 0.1 m/s, no wings)
+#   • flying    = run_whole_animal          (V_air = V_mr, wings active
+#                                            with T_wing = T_air + 2 K)
+# Q_gen, Q_wing_loss and T_core are shown side-by-side.
+# ─────────────────────────────────────────────────────────────────────
+let
+    using .WholeAnimalHeatBalance: run_whole_animal
+    println("\n=== 13. Perched vs flying — 34 g bird across T_air ===========")
+
+    base_micro(T_air_C) = microclimate_at_altitude(
+        altitude           = 30.0u"m",
+        air_temperature    = T_air_C * u"°C",
+        ground_temperature = (T_air_C + 5.0) * u"°C",
+        sky_temperature    = (T_air_C - 10.0) * u"°C",
+        zenith_angle       = 60.0u"°",
+        global_radiation   = 200.0u"W/m^2",
+        diffuse_fraction   = 0.30,
+        relative_humidity  = 0.30,
+        shade              = 1.0,
+    )
+
+    T_air_C = collect(range(-10.0, 45.0; length = 12))
+    bb      = build_body_for_mass(0.034)
+    V_mr    = afpt_v_mr(0.034) * u"m/s"
+
+    n = length(T_air_C)
+    Q_perch  = Vector{Float64}(undef, n)
+    Q_fly    = Vector{Float64}(undef, n)
+    Q_wing   = Vector{Float64}(undef, n)
+    T_perch  = Vector{Float64}(undef, n)
+    T_fly    = Vector{Float64}(undef, n)
+
+    for (i, Ta) in enumerate(T_air_C)
+        micro = base_micro(Ta)
+        rp = run_body_thermoregulation(bb, micro; V_air = 0.1u"m/s")
+        rf = run_whole_animal(bb, micro; V_air = V_mr)
+        Q_perch[i] = ustrip(u"W",  rp.endotherm_out.energy_fluxes.Q_gen)
+        Q_fly[i]   = ustrip(u"W",  rf.energy_fluxes.Q_gen)
+        Q_wing[i]  = ustrip(u"W",  rf.Q_wing_loss)
+        T_perch[i] = ustrip(u"°C", rp.endotherm_out.thermoregulation.T_core)
+        T_fly[i]   = ustrip(u"°C", rf.thermoregulation.T_core)
+    end
+
+    println("  T_air  Q_perch  Q_fly  Q_wing  T_core_perch  T_core_fly")
+    for i in 1:n
+        @printf "  %5.1f  %6.3f  %6.3f  %+6.3f  %10.2f  %10.2f\n" (
+            T_air_C[i]) Q_perch[i] Q_fly[i] Q_wing[i] T_perch[i] T_fly[i]
+    end
+
+    if _PLOTS_AVAILABLE
+        p1 = Plots.plot(T_air_C, [Q_perch Q_fly];
+                        xlabel = "T_air [°C]", ylabel = "Q_gen [W]",
+                        lw = 2, label = ["perched" "flying"],
+                        title = "Metabolic heat production",
+                        legend = :topright)
+        Plots.plot!(p1, T_air_C, Q_wing; lw = 2, ls = :dash,
+                    label = "Q_wing_loss (flying)")
+        p2 = Plots.plot(T_air_C, [T_perch T_fly];
+                        xlabel = "T_air [°C]", ylabel = "T_core [°C]",
+                        lw = 2, label = ["perched" "flying"],
+                        title = "Core temperature",
+                        legend = :topleft)
+        display(Plots.plot(p1, p2; layout = (1, 2), size = (1000, 400)))
+    end
+end
+
+
+# ─────────────────────────────────────────────────────────────────────
+# 14. Body mass sweep — Q_gen / T_core across 5 g → 1 kg at 25 °C
+# ─────────────────────────────────────────────────────────────────────
+let
+    println("\n=== 14. Body thermoregulation — mass sweep 5 g → 1 kg ========")
+
+    micro = microclimate_at_altitude(
+        altitude           = 30.0u"m",
+        air_temperature    = 25.0u"°C",
+        ground_temperature = 30.0u"°C",
+        sky_temperature    = 15.0u"°C",
+        zenith_angle       = 60.0u"°",
+        global_radiation   = 200.0u"W/m^2",
+        diffuse_fraction   = 0.30,
+        relative_humidity  = 0.40,
+        shade              = 1.0,
+    )
+
+    masses = exp10.(range(log10(0.005), log10(1.0); length = 12))
+    println("  m [g]   ax    fd[mm]   Q_gen[W]   T_core[°C]  T_skin[°C]  pant   evap[mg/s]")
+    for m in masses
+        bb = build_body_for_mass(m)
+        r  = run_body_thermoregulation(bb, micro; V_air = 0.1u"m/s")
+        tr = r.endotherm_out.thermoregulation
+        ef = r.endotherm_out.energy_fluxes
+        mf = r.endotherm_out.mass_fluxes
+        @printf "  %6.1f  %.2f  %6.2f  %8.4f  %9.2f  %9.2f  %5.2f  %9.3f\n" (
+            1000 * m) bb.axis_ratio (1000 * ustrip(u"m", bb.feather_depth)) ustrip(u"W", ef.Q_gen) ustrip(u"°C", tr.T_core) ustrip(u"°C", tr.T_skin) tr.pant (1e6 * ustrip(u"kg/s", mf.m_evap))
+    end
+end
+
+
+# ─────────────────────────────────────────────────────────────────────
+# 15. Body thermoregulation — same 100 g bird across three microclimates
+# ─────────────────────────────────────────────────────────────────────
+let
+    println("\n=== 15. Body thermoregulation — 100 g bird cold/temp/hot =====")
+
+    envs = (
+        cold      = microclimate_at_altitude(altitude = 30.0u"m",
+                        air_temperature = -10.0u"°C",
+                        ground_temperature = -5.0u"°C",
+                        sky_temperature = -25.0u"°C",
+                        zenith_angle = 60.0u"°",
+                        global_radiation = 200.0u"W/m^2",
+                        diffuse_fraction = 0.40,
+                        relative_humidity = 0.70),
+        temperate = microclimate_at_altitude(altitude = 30.0u"m",
+                        air_temperature = 15.0u"°C",
+                        ground_temperature = 25.0u"°C",
+                        sky_temperature = 5.0u"°C",
+                        zenith_angle = 10.0u"°",
+                        global_radiation = 500.0u"W/m^2",
+                        diffuse_fraction = 0.20,
+                        relative_humidity = 0.50),
+        hot       = microclimate_at_altitude(altitude = 30.0u"m",
+                        air_temperature = 38.0u"°C",
+                        ground_temperature = 55.0u"°C",
+                        sky_temperature = 25.0u"°C",
+                        zenith_angle = 5.0u"°",
+                        global_radiation = 950.0u"W/m^2",
+                        diffuse_fraction = 0.10,
+                        relative_humidity = 0.30,
+                        shade = 0.5),
+    )
+
+    bb = build_body_for_mass(0.100)
+    println("  env        Ta[°C]  Q_gen[W]  T_core[°C]  T_skin[°C]  pant   wet     evap[mg/s]")
+    for (name, micro) in pairs(envs)
+        r  = run_body_thermoregulation(bb, micro; V_air = 0.1u"m/s")
+        tr = r.endotherm_out.thermoregulation
+        ef = r.endotherm_out.energy_fluxes
+        mf = r.endotherm_out.mass_fluxes
+        @printf "  %-9s %6.1f  %8.4f  %9.2f  %9.2f  %5.2f  %5.4f  %9.3f\n" String(name) ustrip(u"°C", micro.air_temperature) ustrip(u"W", ef.Q_gen) ustrip(u"°C", tr.T_core) ustrip(u"°C", tr.T_skin) tr.pant tr.skin_wetness (1e6 * ustrip(u"kg/s", mf.m_evap))
+    end
+end
+
 
 println("\nAll demos complete.")

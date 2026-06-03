@@ -26,6 +26,8 @@
 
 include("afpt.jl")
 include("wing_heatbalance_2.0.jl")
+include("body_heatbalance.jl")
+include("whole_animal_heatbalance.jl")
 
 module WingPower
 

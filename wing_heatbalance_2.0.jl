@@ -37,12 +37,21 @@ using Unitful
 
 using BiophysicalGeometry
 using BiophysicalGeometry: Body, Plate, Naked, total_area, silhouette_area
-using HeatExchange: convection, radiation_in, radiation_out, solar,
+# New (DV6Hr/74Jof) HeatExchange API:
+#   - `radin`/`radout` replaced old `radiation_in`/`radiation_out`
+#   - flux fields renamed: `convection_flow`→`Q_conv`, `heat_transfer_coefficient.combined`→`hc`,
+#     `solar_flow`→`Q_solar`, `*_flow` on radiation/solar all → `Q_*`
+#   - `Absorptivities`/`Emissivities` now use flat `body_dorsal`/`body_ventral` kwargs
+#     (no more `DorsalVentral` wrapper)
+#   - `convection(...)` no longer takes `characteristic_dimension_formula`; instead it
+#     reads `body.geometry.characteristic_dimension` (we inject the chord via `@set`
+#     in `element_to_body` to preserve the old per-strip Reynolds-number physics)
+#   - `fluid` is now an `Int` (0=air, 1=water) — `Air()` is gone
+using HeatExchange: convection, radin, radout, solar,
                     Absorptivities, Emissivities, ViewFactors,
-                    SolarConditions, EnvironmentTemperatures,
-                    DorsalVentral, Air,
-                    ScaledDimension, VolumeCubeRoot
+                    SolarConditions, EnvironmentTemperatures
 using FluidProperties: dry_air_properties, atmospheric_pressure, GasFractions
+using Setfield: @set
 
 
 # =====================================================================
@@ -148,10 +157,11 @@ Wraps the values returned by `FluidProperties.dry_air_properties`.
 end
 
 function air_properties(T_air; altitude = 0.0u"m", P = nothing,
-                        gas_fractions::GasFractions = GasFractions())
+                        gasfrac::GasFractions = GasFractions())
     T_K    = isa(T_air, Quantity) ? uconvert(u"K", T_air) : T_air * u"K"
     P_used = P === nothing ? atmospheric_pressure(altitude) : P
-    fp     = dry_air_properties(T_K, P_used; gas_fractions = gas_fractions)
+    # NOTE: HE 4c7e8f8 + matching FluidProperties pin use the short kwarg `gasfrac`.
+    fp     = dry_air_properties(T_K, P_used; gasfrac = gasfrac)
     cp_air = 1005.8u"J/(kg*K)"
     Pr_val = ustrip(u"NoUnits",
                     fp.dynamic_viscosity * cp_air / fp.thermal_conductivity)
@@ -203,7 +213,18 @@ function element_to_body(elem::WingElement; tissue_density = 1000.0u"kg/m^3")
     c = L / H
     m = tissue_density * V
     plate = Plate(m, tissue_density, b, c)
-    return Body(plate, Naked())
+    body = Body(plate, Naked())
+    # ── Preserve the old per-strip Reynolds number ───────────────────
+    # The new `BiophysicalGeometry` computes `Geometry.characteristic_dimension`
+    # as `volume^(1/3)` for a Plate, which for a thin wing strip is ≪ chord and
+    # would give a Reynolds number ~10× smaller than the physically meaningful
+    # chord-based Re used by the wing literature (and by our `MixedPlate()`
+    # regime).  Override it with the chord (`L = elem.chord_length`) so that
+    # both the `HeatExchange.convection` branch and the analytic `MixedPlate`
+    # branch see the same characteristic dimension.  `@set` (Setfield.jl)
+    # returns a new struct because `Geometry` is immutable.
+    body = @set body.geometry.characteristic_dimension = L
+    return body
 end
 
 
@@ -351,7 +372,13 @@ function element_heat_balance(elem::WingElement,
                               absorptivities::Absorptivities,
                               emissivities::Emissivities,
                               view_factors::ViewFactors,
-                              characteristic_dim_formula = ScaledDimension(:length_skin),
+                              # `characteristic_dim_formula` is gone in the new
+                              # API — the chord is baked into
+                              # `body.geometry.characteristic_dimension` by
+                              # `element_to_body`.  Kwarg kept here as a no-op
+                              # placeholder for any caller passing it, but it
+                              # is ignored.
+                              characteristic_dim_formula = nothing,
                               conduction_fraction::Real = 0.0,
                               silhouette_area_override = nothing,
                               convection_model::Union{Nothing,PlateConvectionRegime} = nothing,
@@ -380,7 +407,7 @@ function element_heat_balance(elem::WingElement,
         air_used = air === nothing ?
                         air_properties(micro.air_temperature;
                                        P = micro.atmospheric_pressure,
-                                       gas_fractions = micro.gas_fractions) :
+                                       gasfrac = micro.gas_fractions) :
                         air
         L  = elem.chord_length
         Re = reynolds_number(V_air, L, air_used.ν)
@@ -400,30 +427,38 @@ function element_heat_balance(elem::WingElement,
             h_avg /= 2
         end
     else
-        # HeatExchange.convection (package default — turbulent flat plate)
+        # HeatExchange.convection (package default, mixed free + forced).
+        # New API:
+        #   - kwargs renamed: `air_temperature`→`T_air`,
+        #     `surface_temperature`→`T_surface`, `atmospheric_pressure`→`P_atmos`,
+        #     `gas_fractions`→`gasfrac`
+        #   - `fluid` is now an Int (0=air, 1=water); `Air()` is gone
+        #   - `characteristic_dimension_formula` is gone; the call reads
+        #     `body.geometry.characteristic_dimension` (we set this to the
+        #     chord in `element_to_body` so per-strip Re is preserved)
+        #   - result fields renamed: `convection_flow`→`Q_conv`,
+        #     `heat_transfer_coefficient.combined`→`hc`
         if A_d > 0u"m^2"
             cd = convection(; body = body, area = A_d,
-                              air_temperature       = T_air,
-                              surface_temperature   = T_d_K,
+                              T_air                 = T_air,
+                              T_surface             = T_d_K,
                               wind_speed            = V_air,
-                              atmospheric_pressure  = micro.atmospheric_pressure,
-                              fluid                 = Air(),
-                              gas_fractions         = micro.gas_fractions,
-                              characteristic_dimension_formula = characteristic_dim_formula)
-            Q_conv_d = uconvert(u"W", cd.convection_flow)
-            h_avg   += cd.heat_transfer_coefficient.combined
+                              P_atmos               = micro.atmospheric_pressure,
+                              fluid                 = 0,
+                              gasfrac               = micro.gas_fractions)
+            Q_conv_d = uconvert(u"W", cd.Q_conv)
+            h_avg   += cd.hc
         end
         if A_v > 0u"m^2"
             cv = convection(; body = body, area = A_v,
-                              air_temperature       = T_air,
-                              surface_temperature   = T_v_K,
+                              T_air                 = T_air,
+                              T_surface             = T_v_K,
                               wind_speed            = V_air,
-                              atmospheric_pressure  = micro.atmospheric_pressure,
-                              fluid                 = Air(),
-                              gas_fractions         = micro.gas_fractions,
-                              characteristic_dimension_formula = characteristic_dim_formula)
-            Q_conv_v = uconvert(u"W", cv.convection_flow)
-            h_avg   += cv.heat_transfer_coefficient.combined
+                              P_atmos               = micro.atmospheric_pressure,
+                              fluid                 = 0,
+                              gasfrac               = micro.gas_fractions)
+            Q_conv_v = uconvert(u"W", cv.Q_conv)
+            h_avg   += cv.hc
         end
         if A_d > 0u"m^2" && A_v > 0u"m^2"
             h_avg /= 2
@@ -447,15 +482,17 @@ function element_heat_balance(elem::WingElement,
                          diffuse_fraction = float(micro.diffuse_fraction),
                          shade            = float(micro.shade))
     sol = solar(body, absorptivities, view_factors, sc, sil, cond_area)
-    Q_sol = uconvert(u"W", sol.solar_flow)
+    # New result field names (DV6Hr): solar_flow→Q_solar, solar_*_flow→Q_*
+    Q_sol = uconvert(u"W", sol.Q_solar)
 
-    # Longwave in / out
-    rin  = radiation_in(body, view_factors, emissivities, env_T;
-                        conduction_fraction = conduction_fraction)
-    rout = radiation_out(body, view_factors, emissivities,
-                         conduction_fraction, T_d_K, T_v_K)
-    Q_lw_in  = uconvert(u"W", rin.longwave_flow_in)
-    Q_lw_out = uconvert(u"W", rout.longwave_flow_out)
+    # Longwave in / out — functions renamed `radiation_in`→`radin`,
+    # `radiation_out`→`radout`; result fields `longwave_flow_*`→`Q_ir_*`.
+    rin  = radin(body, view_factors, emissivities, env_T;
+                 conduction_fraction = conduction_fraction)
+    rout = radout(body, view_factors, emissivities,
+                  conduction_fraction, T_d_K, T_v_K)
+    Q_lw_in  = uconvert(u"W", rin.Q_ir_in)
+    Q_lw_out = uconvert(u"W", rout.Q_ir_out)
     Q_lw_net = Q_lw_in - Q_lw_out
 
     Q_conv  = Q_conv_d + Q_conv_v
@@ -471,9 +508,9 @@ function element_heat_balance(elem::WingElement,
         Q_conv          = Q_conv,
         h_conv          = uconvert(u"W/(m^2*K)", h_avg),
         Q_solar         = Q_sol,
-        Q_solar_direct  = uconvert(u"W", sol.solar_direct_flow),
-        Q_solar_sky     = uconvert(u"W", sol.solar_sky_flow),
-        Q_solar_ground  = uconvert(u"W", sol.solar_substrate_flow),
+        Q_solar_direct  = uconvert(u"W", sol.Q_direct),
+        Q_solar_sky     = uconvert(u"W", sol.Q_solar_sky),
+        Q_solar_ground  = uconvert(u"W", sol.Q_solar_substrate),
         Q_lw_in         = Q_lw_in,
         Q_lw_out        = Q_lw_out,
         Q_lw_net        = Q_lw_net,
@@ -492,7 +529,7 @@ end
 default_absorptivities(; α_d = _DEFAULT_BODY_ABS_DORSAL,
                           α_v = _DEFAULT_BODY_ABS_VENTRAL,
                           α_ground = _DEFAULT_GROUND_ALBEDO) =
-    Absorptivities(; body = DorsalVentral(α_d, α_v), ground = α_ground)
+    Absorptivities(; body_dorsal = α_d, body_ventral = α_v, ground = α_ground)
 
 """
     default_emissivities(; ε_d, ε_v, ε_ground, ε_sky) → HeatExchange.Emissivities
@@ -501,7 +538,7 @@ default_emissivities(; ε_d = _DEFAULT_BODY_EMISS,
                         ε_v = _DEFAULT_BODY_EMISS,
                         ε_ground = _DEFAULT_GROUND_EMISS,
                         ε_sky    = _DEFAULT_SKY_EMISS) =
-    Emissivities(; body = DorsalVentral(ε_d, ε_v),
+    Emissivities(; body_dorsal = ε_d, body_ventral = ε_v,
                    ground = ε_ground, sky = ε_sky)
 
 """
@@ -537,7 +574,7 @@ function compute_heatbalance_snapshot(wd::WingDiscretization,
                                       absorptivities::Absorptivities = default_absorptivities(),
                                       emissivities::Emissivities    = default_emissivities(),
                                       view_factors::ViewFactors     = default_view_factors(),
-                                      characteristic_dim_formula    = ScaledDimension(:length_skin),
+                                      characteristic_dim_formula    = nothing,  # ignored (new API; chord baked into Body)
                                       conduction_fraction::Real     = 0.0,
                                       use_flat_plate_silhouette::Bool = true,
                                       convection_model::Union{Nothing,PlateConvectionRegime} = nothing,
@@ -555,7 +592,7 @@ function compute_heatbalance_snapshot(wd::WingDiscretization,
     if convection_model isa PlateConvectionRegime && air_used === nothing
         air_used = air_properties(micro.air_temperature;
                                   P = micro.atmospheric_pressure,
-                                  gas_fractions = micro.gas_fractions)
+                                  gasfrac = micro.gas_fractions)
     end
 
     for i in 1:n
@@ -615,7 +652,7 @@ function compute_wingbeat_heatbalance(kin::FlappingKinematics,
                                       absorptivities::Absorptivities = default_absorptivities(),
                                       emissivities::Emissivities    = default_emissivities(),
                                       view_factors::ViewFactors     = default_view_factors(),
-                                      characteristic_dim_formula    = ScaledDimension(:length_skin),
+                                      characteristic_dim_formula    = nothing,  # ignored (new API; chord baked into Body)
                                       conduction_fraction::Real     = 0.0,
                                       use_flat_plate_silhouette::Bool = true,
                                       convection_model::Union{Nothing,PlateConvectionRegime} = nothing)
@@ -631,7 +668,7 @@ function compute_wingbeat_heatbalance(kin::FlappingKinematics,
     air_shared = if convection_model isa PlateConvectionRegime
         air_properties(micro.air_temperature;
                        P = micro.atmospheric_pressure,
-                       gas_fractions = micro.gas_fractions)
+                       gasfrac = micro.gas_fractions)
     else
         nothing
     end

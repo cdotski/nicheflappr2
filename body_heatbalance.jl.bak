@@ -1,0 +1,439 @@
+# =====================================================================
+# body_heatbalance.jl
+#
+# Whole-body (ellipsoidal trunk + feather insulation) heat-flux model
+# built on the BiophysicalEcology suite, designed to scale across the
+# 5 g → 15 kg body-mass range required by nicheflappr2.
+#
+# Built on:
+#   • BiophysicalGeometry.jl  — Ellipsoid shape + CompositeInsulation(fur, fat)
+#   • HeatExchange.jl         — convection + radiation_in / radiation_out / solar
+#   • FluidProperties.jl      — atmospheric_pressure, dry-air properties
+#   • AFPT                    — V_mr (used as the convection driving wind)
+#
+# NO heat-transfer correlations are defined here; everything is delegated
+# to the upstream packages.  The module is intentionally a **fluxes-only**
+# layer (no thermoregulation closure) — this matches `wing_heatbalance_2.0.jl`
+# and leaves the eventual `Q_gen` solve for the whole-animal module.
+#
+# Allometric scaling (approved 2026-06):
+#
+#   axis_ratio (a/b = c=b)  : log-linear 1.1 (5 g) → 1.6 (15 kg)
+#   feather depth            : d_f = 0.01737 · m^0.33   [m]
+#                              (anchored to budgie 5.7 mm @ 34 g)
+#   body density             : 1000 kg/m³ (budgie default)
+#   fibre diameter           : 30 μm  (budgie)
+#   fibre density            : 5e8 /m² (budgie)
+#   fat fraction             : 0.0    (BiophysicalGeometry default)
+#   flesh thermal conductivity: 0.9 W/m/K (BiophysicalGeometry default)
+#   insulation reflectance   : 0.248 / 0.351 dorsal/ventral (budgie)
+#   body emissivity          : 0.99 dorsal = ventral (budgie)
+#   ground/sky emissivities  : 1.0 / 1.0
+#   skin wetness             : 0.005 (budgie)  — NOT used here (fluxes only)
+#   core temperature         : 312.15 K = 39 °C (typical avian)
+#   metabolic rate           : AFPT.estimate_basal_metabolic_rate (consumer
+#                              of this module can override per call)
+#
+# Module-loading note: this file expects `environment.jl` (the
+# `FlightEnvironment` module) and `afpt.jl` (`AFPT`) to have been
+# `include`d already — that is the case when `wing_power.jl` has been
+# loaded first (which `function_demos.jl` does).
+# =====================================================================
+
+module BodyHeatBalance
+
+using Unitful
+using ..FlightEnvironment
+using ..FlightEnvironment: Microclimate, microclimate_at_altitude
+using ..AFPT
+using ..AFPT: AfptBird, build_afpt_bird,
+              wing_span_allometry, wing_area_allometry,
+              find_maximum_range_speed, find_minimum_power_speed,
+              estimate_basal_metabolic_rate
+
+using BiophysicalGeometry: Body, Ellipsoid, CompositeInsulation,
+                            FibrousLayer, FatLayer, Naked,
+                            total_area, silhouette_area
+using HeatExchange: convection, radiation_in, radiation_out, solar,
+                    Absorptivities, Emissivities, ViewFactors, DorsalVentral,
+                    SolarConditions, EnvironmentTemperatures, Air,
+                    VolumeCubeRoot, HardBound
+using FluidProperties: atmospheric_pressure
+
+
+# =====================================================================
+# Scaling laws & constants
+# =====================================================================
+
+"Body axis ratio a/b (with c = b) as a function of body mass [kg].
+Log-linear between 1.1 at 5 g and 1.6 at 15 kg — captures the trend
+from near-spherical small passerines toward more elongated trunks of
+larger birds while staying close to the budgie reference value
+across most of the range."
+function axis_ratio_allometry(m_kg::Real)
+    m_lo, m_hi = 0.005, 15.0
+    r_lo, r_hi = 1.1, 1.6
+    x = (log(m_kg) - log(m_lo)) / (log(m_hi) - log(m_lo))
+    return r_lo + (r_hi - r_lo) * clamp(x, 0.0, 1.0)
+end
+
+"Feather (insulation) depth [m] as a function of body mass [kg].
+Anchored to the budgie value (5.7 mm at 34 g) with the bird allometric
+exponent 0.33: d_f = 0.01737 · m^0.33.  Yields ≈ 3.1 mm at 5 g and
+≈ 42 mm at 15 kg."
+feather_depth_allometry(m_kg::Real) = 0.01737 * m_kg^0.33
+
+# Constants (see header docstring for sources)
+const ρ_FLESH         = 1000.0u"kg/m^3"
+const FIBRE_DIAMETER  = 30.0e-6u"m"
+const FIBRE_DENSITY   = 5.0e8u"1/m^2"
+const FAT_FRACTION    = 0.0
+const FAT_DENSITY     = 901.0u"kg/m^3"
+const REFL_DORSAL     = 0.248
+const REFL_VENTRAL    = 0.351
+const EMISS_BODY      = 0.99
+const EMISS_GROUND    = 1.0
+const EMISS_SKY       = 1.0
+const VF_SKY          = 0.5
+const VF_GROUND       = 0.5
+const GROUND_ALBEDO   = 0.8            # ground SOLAR ABSORPTIVITY (matches
+                                       # wing module / budgerigar example)
+const T_CORE_DEFAULT  = 312.15u"K"     # 39 °C, typical avian
+
+
+# =====================================================================
+# BirdBody container
+# =====================================================================
+
+"""
+    BirdBody
+
+Geometry + insulation bundle for one bird at a given body mass.
+`body` is a `BiophysicalGeometry.Body` whose outer (feathered) surface
+is what every HeatExchange radiation/convection call sees.
+"""
+struct BirdBody{B}
+    m_kg::Float64
+    axis_ratio::Float64
+    feather_depth::typeof(0.0u"m")
+    shape::Ellipsoid
+    fur::FibrousLayer
+    fat::FatLayer
+    body::B
+end
+
+"""
+    build_body_for_mass(m_kg; axis_ratio = axis_ratio_allometry(m_kg),
+                              feather_depth_m = feather_depth_allometry(m_kg),
+                              ρ_flesh = ρ_FLESH,
+                              fibre_diameter = FIBRE_DIAMETER,
+                              fibre_density  = FIBRE_DENSITY,
+                              fat_fraction   = FAT_FRACTION,
+                              fat_density    = FAT_DENSITY) → BirdBody
+
+Construct an ellipsoidal `BirdBody` for body mass `m_kg` [kg] using
+the approved allometric defaults.  Any default may be overridden
+per call.
+"""
+function build_body_for_mass(m_kg::Real;
+                             axis_ratio::Real    = axis_ratio_allometry(m_kg),
+                             feather_depth_m::Real = feather_depth_allometry(m_kg),
+                             ρ_flesh             = ρ_FLESH,
+                             fibre_diameter      = FIBRE_DIAMETER,
+                             fibre_density       = FIBRE_DENSITY,
+                             fat_fraction::Real  = FAT_FRACTION,
+                             fat_density         = FAT_DENSITY)
+    m  = float(m_kg) * u"kg"
+    fd = float(feather_depth_m) * u"m"
+    shape = Ellipsoid(m, ρ_flesh, float(axis_ratio), float(axis_ratio))
+    fat   = FatLayer(float(fat_fraction), fat_density)
+    fur   = FibrousLayer(fd, fibre_diameter, fibre_density)
+    body  = Body(shape, CompositeInsulation(fur, fat))
+    return BirdBody(float(m_kg), float(axis_ratio), fd, shape, fur, fat, body)
+end
+
+
+# =====================================================================
+# Heat-flux result struct
+# =====================================================================
+
+"""
+    BodyHeatFlux
+
+Per-body instantaneous heat flows.  Sign convention follows the wing
+module:
+  • Q_conv  positive ⇒ heat lost from body to air
+  • Q_solar positive ⇒ absorbed by body
+  • Q_lw_in  positive ⇒ absorbed by body
+  • Q_lw_out positive ⇒ emitted by body
+  • Q_lw_net = Q_lw_in − Q_lw_out
+  • Q_net   = Q_solar + Q_lw_net − Q_conv  (positive ⇒ net heating)
+"""
+@kwdef struct BodyHeatFlux
+    m_kg::Float64
+
+    # Driving conditions
+    T_dorsal::Quantity
+    T_ventral::Quantity
+    V_air::Quantity
+
+    # Geometry (outer feathered surface)
+    total_area::Quantity
+    silhouette::Quantity
+
+    # Heat-transfer coefficient
+    h_conv::Quantity
+
+    # Heat flows
+    Q_conv::Quantity
+    Q_solar::Quantity
+    Q_solar_direct::Quantity
+    Q_solar_sky::Quantity
+    Q_solar_ground::Quantity
+    Q_lw_in::Quantity
+    Q_lw_out::Quantity
+    Q_lw_net::Quantity
+    Q_net::Quantity
+
+    # Reference metabolic rate (passive — not used in the balance here)
+    Q_basal::Quantity
+end
+
+
+# =====================================================================
+# Core heat-balance call
+# =====================================================================
+
+"""
+    body_heat_balance(bb, micro; T_dorsal, T_ventral, V_air,
+                                  refl_dorsal, refl_ventral,
+                                  emiss_body, conduction_fraction,
+                                  bird_type, Q_basal) → BodyHeatFlux
+
+Evaluate every heat-flow pathway for a `BirdBody` at one instant of a
+`Microclimate`, at user-specified outer-surface temperatures and a
+user-specified relative airspeed `V_air` (which is what the forced-
+convection branch of `HeatExchange.convection` sees).
+
+All fluxes come straight from `HeatExchange.{convection, radiation_in,
+radiation_out, solar}`; this function just builds the input structs,
+calls them, and sums.
+"""
+function body_heat_balance(bb::BirdBody,
+                           micro::Microclimate;
+                           T_dorsal,
+                           T_ventral,
+                           V_air,
+                           refl_dorsal::Real  = REFL_DORSAL,
+                           refl_ventral::Real = REFL_VENTRAL,
+                           emiss_body::Real   = EMISS_BODY,
+                           emiss_ground::Real = EMISS_GROUND,
+                           emiss_sky::Real    = EMISS_SKY,
+                           view_factor_sky::Real    = VF_SKY,
+                           view_factor_ground::Real = VF_GROUND,
+                           conduction_fraction::Real = 0.0,
+                           bird_type::Symbol  = :other,
+                           Q_basal            = nothing)
+    body = bb.body
+    Td_K = uconvert(u"K", isa(T_dorsal,  Quantity) ? T_dorsal  : T_dorsal  * u"°C")
+    Tv_K = uconvert(u"K", isa(T_ventral, Quantity) ? T_ventral : T_ventral * u"°C")
+    Ta_K = uconvert(u"K", micro.air_temperature)
+    V    = isa(V_air, Quantity) ? uconvert(u"m/s", V_air) : V_air * u"m/s"
+
+    A_tot = total_area(body)
+
+    # ── Convection (single ellipsoid, characteristic dim = V^(1/3)) ──
+    # The body is one closed surface — call convection once at the
+    # area-averaged surface temperature.  HeatExchange.convection
+    # combines free + forced internally, which is what we want for a
+    # body that may be perched (V≈0) or in cruise (V = V_mr).
+    T_surf_K = (Td_K + Tv_K) / 2
+    A_conv = A_tot * (1 - conduction_fraction)
+    cv = convection(; body = body, area = A_conv,
+                      air_temperature      = Ta_K,
+                      surface_temperature  = T_surf_K,
+                      wind_speed           = V,
+                      atmospheric_pressure = micro.atmospheric_pressure,
+                      fluid                = Air(),
+                      gas_fractions        = micro.gas_fractions,
+                      characteristic_dimension_formula = VolumeCubeRoot(),
+                      smoothing            = HardBound())
+    Q_conv = uconvert(u"W", cv.convection_flow)
+    h_conv = uconvert(u"W/(m^2*K)", cv.heat_transfer_coefficient.combined)
+
+    # ── Radiation env containers ────────────────────────────────────
+    env_T = EnvironmentTemperatures(Ta_K,
+                                    uconvert(u"K", micro.sky_temperature),
+                                    uconvert(u"K", micro.ground_temperature),
+                                    Ta_K, Ta_K, Ta_K)
+    absorptivities = Absorptivities(
+        body   = DorsalVentral(1 - refl_dorsal, 1 - refl_ventral),
+        ground = GROUND_ALBEDO,
+    )
+    emissivities = Emissivities(
+        body   = DorsalVentral(emiss_body, emiss_body),
+        ground = emiss_ground,
+        sky    = emiss_sky,
+    )
+    vf = ViewFactors(view_factor_sky, view_factor_ground, 0.0, 0.0)
+    sc = SolarConditions(zenith_angle     = uconvert(u"°", micro.zenith_angle),
+                         global_radiation = uconvert(u"W/m^2", micro.global_radiation),
+                         diffuse_fraction = float(micro.diffuse_fraction),
+                         shade            = float(micro.shade))
+
+    # ── Solar (uses default orientation-averaged silhouette) ────────
+    sil = silhouette_area(body, sc.zenith_angle)
+    cond_area = A_tot * conduction_fraction
+    sol = solar(body, absorptivities, vf, sc, sil, cond_area)
+    Q_sol = uconvert(u"W", sol.solar_flow)
+
+    # ── Longwave ─────────────────────────────────────────────────────
+    rin  = radiation_in(body, vf, emissivities, env_T;
+                        conduction_fraction = conduction_fraction)
+    rout = radiation_out(body, vf, emissivities,
+                         conduction_fraction, Td_K, Tv_K)
+    Q_lw_in  = uconvert(u"W", rin.longwave_flow_in)
+    Q_lw_out = uconvert(u"W", rout.longwave_flow_out)
+    Q_lw_net = Q_lw_in - Q_lw_out
+
+    Q_net = Q_sol + Q_lw_net - Q_conv
+
+    Q_b = Q_basal === nothing ?
+            estimate_basal_metabolic_rate(bb.m_kg, bird_type) * u"W" :
+            (isa(Q_basal, Quantity) ? uconvert(u"W", Q_basal) : Q_basal * u"W")
+
+    return BodyHeatFlux(
+        m_kg           = bb.m_kg,
+        T_dorsal       = Td_K,
+        T_ventral      = Tv_K,
+        V_air          = V,
+        total_area     = uconvert(u"m^2", A_tot),
+        silhouette     = uconvert(u"m^2", sil),
+        h_conv         = h_conv,
+        Q_conv         = Q_conv,
+        Q_solar        = Q_sol,
+        Q_solar_direct = uconvert(u"W", sol.solar_direct_flow),
+        Q_solar_sky    = uconvert(u"W", sol.solar_sky_flow),
+        Q_solar_ground = uconvert(u"W", sol.solar_substrate_flow),
+        Q_lw_in        = Q_lw_in,
+        Q_lw_out       = Q_lw_out,
+        Q_lw_net       = Q_lw_net,
+        Q_net          = Q_net,
+        Q_basal        = Q_b,
+    )
+end
+
+
+# =====================================================================
+# Convenience: V_mr from AFPT, ΔT from air
+# =====================================================================
+
+"""
+    afpt_v_mr(m_kg; type = :other) → Float64 [m/s]
+
+Maximum-range airspeed from an afpt bird built with canonical
+Pennycuick allometries.  This is the speed used as the convective
+driving wind for an in-flight body unless the caller overrides
+`V_air`.
+"""
+function afpt_v_mr(m_kg::Real; type::Symbol = :other)
+    bird = build_afpt_bird(m_kg, wing_span_allometry(m_kg);
+                           wingArea = wing_area_allometry(m_kg),
+                           type     = type)
+    return find_maximum_range_speed(bird)
+end
+
+"""
+    body_heat_balance_for_mass(m_kg, micro;
+                               ΔT_surface   = 2.0u"K",
+                               V_air        = nothing,
+                               bird_type    = :other,
+                               kwargs...) → (BirdBody, BodyHeatFlux)
+
+One-call helper: build the allometric `BirdBody`, pick `V_air = V_mr`
+from AFPT (unless overridden), set the outer-surface temperature to
+`T_air + ΔT_surface` (dorsal and ventral the same by default), and
+evaluate the heat balance.  Extra `kwargs` are forwarded to
+`body_heat_balance`.
+"""
+function body_heat_balance_for_mass(m_kg::Real, micro::Microclimate;
+                                    ΔT_surface = 2.0u"K",
+                                    V_air      = nothing,
+                                    bird_type::Symbol = :other,
+                                    T_dorsal   = nothing,
+                                    T_ventral  = nothing,
+                                    kwargs...)
+    bb   = build_body_for_mass(m_kg)
+    V    = V_air === nothing ? afpt_v_mr(m_kg; type = bird_type) * u"m/s" : V_air
+    T_air = uconvert(u"K", micro.air_temperature)
+    ΔT_K = isa(ΔT_surface, Quantity) ? uconvert(u"K", ΔT_surface) : ΔT_surface * u"K"
+    Td = T_dorsal  === nothing ? T_air + ΔT_K : T_dorsal
+    Tv = T_ventral === nothing ? T_air + ΔT_K : T_ventral
+    hb = body_heat_balance(bb, micro;
+                           T_dorsal = Td, T_ventral = Tv, V_air = V,
+                           bird_type = bird_type, kwargs...)
+    return (body = bb, heat = hb)
+end
+
+
+# =====================================================================
+# Mass sweep
+# =====================================================================
+
+"""
+    body_sweep(masses_kg, micro; kwargs...) → NamedTuple of Vectors
+
+Run `body_heat_balance_for_mass` for every mass in `masses_kg` (in kg)
+under one `Microclimate`.  Returns a NamedTuple of vectors covering
+the body geometry, driving conditions, and heat-flow components — the
+columnar layout the demos use to make plots over the body-mass range.
+"""
+function body_sweep(masses_kg::AbstractVector, micro::Microclimate; kwargs...)
+    n = length(masses_kg)
+    out = (m_kg          = Float64[],
+           axis_ratio    = Float64[],
+           feather_depth = Float64[],
+           area          = Float64[],
+           V_air         = Float64[],
+           h_conv        = Float64[],
+           Q_conv        = Float64[],
+           Q_solar       = Float64[],
+           Q_lw_in       = Float64[],
+           Q_lw_out      = Float64[],
+           Q_lw_net      = Float64[],
+           Q_net         = Float64[],
+           Q_basal       = Float64[])
+    sizehint!.(values(out), n)
+    for m in masses_kg
+        r  = body_heat_balance_for_mass(float(m), micro; kwargs...)
+        bb, hb = r.body, r.heat
+        push!(out.m_kg,          bb.m_kg)
+        push!(out.axis_ratio,    bb.axis_ratio)
+        push!(out.feather_depth, ustrip(u"m",       bb.feather_depth))
+        push!(out.area,          ustrip(u"m^2",     hb.total_area))
+        push!(out.V_air,         ustrip(u"m/s",     hb.V_air))
+        push!(out.h_conv,        ustrip(u"W/(m^2*K)", hb.h_conv))
+        push!(out.Q_conv,        ustrip(u"W",       hb.Q_conv))
+        push!(out.Q_solar,       ustrip(u"W",       hb.Q_solar))
+        push!(out.Q_lw_in,       ustrip(u"W",       hb.Q_lw_in))
+        push!(out.Q_lw_out,      ustrip(u"W",       hb.Q_lw_out))
+        push!(out.Q_lw_net,      ustrip(u"W",       hb.Q_lw_net))
+        push!(out.Q_net,         ustrip(u"W",       hb.Q_net))
+        push!(out.Q_basal,       ustrip(u"W",       hb.Q_basal))
+    end
+    return out
+end
+
+
+export BirdBody, BodyHeatFlux,
+       build_body_for_mass, body_heat_balance,
+       body_heat_balance_for_mass, body_sweep,
+       afpt_v_mr,
+       axis_ratio_allometry, feather_depth_allometry,
+       ρ_FLESH, FIBRE_DIAMETER, FIBRE_DENSITY,
+       REFL_DORSAL, REFL_VENTRAL,
+       EMISS_BODY, EMISS_GROUND, EMISS_SKY,
+       VF_SKY, VF_GROUND, T_CORE_DEFAULT
+
+
+end # module BodyHeatBalance

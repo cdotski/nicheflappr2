@@ -2,7 +2,7 @@
 
 julia_version = "1.12.5"
 manifest_format = "2.0"
-project_hash = "ab491eae2e7875c94994791c9f51072b4c3ef753"
+project_hash = "279e01dd48d4f6ee16775e22b727843ae26861ac"
 
 [[deps.AbstractNumbers]]
 deps = ["SpecialFunctions"]
@@ -46,19 +46,21 @@ version = "1.11.0"
 uuid = "2a0f44e3-6c83-55bd-87e4-b1978d98bd5f"
 version = "1.11.0"
 
+[[deps.BiophysicalBehaviour]]
+deps = ["BiophysicalGeometry", "ConstructionBase", "FluidProperties", "HeatExchange", "ModelParameters", "Setfield", "Unitful", "UnitfulMoles"]
+git-tree-sha1 = "44028a63457e3c67cd584ed0c2337f3c80eabda3"
+repo-rev = "main"
+repo-url = "https://github.com/BiophysicalEcology/BiophysicalBehaviour.jl"
+uuid = "17159459-d6a3-4a3d-a4c5-9872d9e70704"
+version = "0.1.0"
+
 [[deps.BiophysicalGeometry]]
 deps = ["Unitful"]
-git-tree-sha1 = "9ec399fe2128db4ed1b4090ea0d71544ef35b576"
-repo-rev = "main"
+git-tree-sha1 = "97baeb2256274a54d3694d479644fd7f11500854"
+repo-rev = "c56f596"
 repo-url = "https://github.com/BiophysicalEcology/BiophysicalGeometry.jl"
 uuid = "06c61620-4f66-4020-a018-07befe374221"
 version = "0.1.0"
-
-    [deps.BiophysicalGeometry.extensions]
-    BiophysicalGeometryMakieExt = "Makie"
-
-    [deps.BiophysicalGeometry.weakdeps]
-    Makie = "ee78f7c6-11fb-53f2-987a-cfe4a2b5a57a"
 
 [[deps.Bzip2_jll]]
 deps = ["Artifacts", "JLLWrappers", "Libdl"]
@@ -220,8 +222,8 @@ version = "0.4.3"
 
 [[deps.FluidProperties]]
 deps = ["Unitful", "UnitfulMoles"]
-git-tree-sha1 = "881a8121b89227219634b1eda07da785d3abfd66"
-repo-rev = "main"
+git-tree-sha1 = "8316ef7c256edc4e682fe03597ffdf67e4b5eb52"
+repo-rev = "2caf235b95d0f97979a36824b38d1744954c9066"
 repo-url = "https://github.com/BiophysicalEcology/FluidProperties.jl"
 uuid = "d16f1b92-71d3-42f3-aafa-43e5bb0efda8"
 version = "0.1.0"
@@ -233,8 +235,8 @@ version = "1.11.0"
 
 [[deps.HeatExchange]]
 deps = ["BiophysicalGeometry", "ConstructionBase", "FluidProperties", "ModelParameters", "Roots", "Unitful", "UnitfulMoles"]
-git-tree-sha1 = "70763bc566a809378007039bef00d3019fbb34c9"
-repo-rev = "main"
+git-tree-sha1 = "3b94214a07bbd8320d85f96190665040c3ea6355"
+repo-rev = "4c7e8f8"
 repo-url = "https://github.com/BiophysicalEcology/HeatExchange.jl"
 uuid = "720bd838-cdd6-4aad-926b-452b962dce21"
 version = "0.1.0"
