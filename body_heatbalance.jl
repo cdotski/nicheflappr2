@@ -564,7 +564,8 @@ end
 """
     run_body_thermoregulation(bb, micro;
                               V_air, T_skin_init, T_insulation_init,
-                              Q_gen_init, environment_kwargs, organism_kwargs)
+                              Q_gen_init, q10_hot, environment_kwargs,
+                              organism_kwargs)
         → (; organism, environment, endotherm_out)
 
 Run BB's `thermoregulate` on a pre-built `BirdBody` under the given
@@ -577,6 +578,11 @@ This is the "fluxes + thermoregulation" entry point.  The whole-animal
 module wraps a custom version of this loop that injects wing fluxes
 at step 0 before any behaviours are deployed.
 
+**Automatic Q10:**  When `T_air ≥ T_core_max` (hyperthermic range) and the
+caller has not supplied `q10` inside `organism_kwargs`, the metabolic Q10 is
+automatically set to `q10_hot` (default 2.0).  Below the threshold q10 = 1.0.
+Supply `organism_kwargs = (q10 = custom,)` to override on any individual run.
+
 Initial-condition defaults:
   T_skin       = T_core − 5 K
   T_insulation = T_air + 0.5·(T_core − T_air)
@@ -587,8 +593,15 @@ function run_body_thermoregulation(bb::BirdBody, micro::Microclimate;
                                    T_skin_init            = nothing,
                                    T_insulation_init      = nothing,
                                    Q_gen_init             = 0.0u"W",
+                                   q10_hot::Real          = 2.0,
                                    environment_kwargs::NamedTuple = NamedTuple(),
                                    organism_kwargs::NamedTuple    = NamedTuple())
+    # ── Auto Q10: ramp to q10_hot once T_air enters the hyperthermic range ─
+    if !haskey(organism_kwargs, :q10)
+        T_air_K = uconvert(u"K", micro.air_temperature)
+        auto_q10 = T_air_K >= T_CORE_MAX ? float(q10_hot) : 1.0
+        organism_kwargs = merge(organism_kwargs, (; q10 = auto_q10))
+    end
     organism    = build_organism(bb; organism_kwargs...)
     environment = build_environment(micro; V_air = V_air, environment_kwargs...)
 

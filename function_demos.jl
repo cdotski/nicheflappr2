@@ -979,8 +979,19 @@ end
 let
     println("\n=== 13. Budgie-style 4-panel: 34 g bird vs T_air =============")
 
+    # ── Humidity profile matching Weathers (1976) lab conditions ─────────
+    # The experiment used a fixed absolute humidity equivalent to 30 % RH
+    # at 40 °C.  Below 30 °C a floor of 15 % is applied.  Implemented via
+    # the Magnus saturation-vapour-pressure formula so we can compute the
+    # corresponding RH at every air temperature without extra dependencies.
+    _e_sat(T_C) = 611.2 * exp(17.67 * T_C / (T_C + 243.5))   # [Pa]
+    _e_ref      = 0.30 * _e_sat(40.0)                          # fixed vapour pressure
+    _rh_profile(T_C) = T_C < 30.0 ? 0.15 : min(_e_ref / _e_sat(T_C), 1.0)
 
-    base_micro(T_air_C) = microclimate_at_altitude(
+    # T_core_max threshold for Q10 activation (budgerigar reference: 43 °C)
+    # (handled automatically by run_body_thermoregulation — no manual q10 needed)
+
+    base_micro(T_air_C; rh = 0.30) = microclimate_at_altitude(
         altitude           = 30.0u"m",
         air_temperature    = T_air_C * u"°C",
         ground_temperature = (T_air_C + 5.0) * u"°C",
@@ -988,7 +999,7 @@ let
         zenith_angle       = 60.0u"°",
         global_radiation   = 200.0u"W/m^2",
         diffuse_fraction   = 0.30,
-        relative_humidity  = 0.30,
+        relative_humidity  = rh,
         shade              = 1.0,           # shade out direct solar so the
                                             # sweep is dominated by air temp
     )
@@ -1007,7 +1018,9 @@ let
     vent     = Vector{Float64}(undef, n)
 
     for (i, Ta) in enumerate(T_air_C)
-        r  = run_body_thermoregulation(bb, base_micro(Ta); V_air = 0.1u"m/s")
+        # Apply temperature-dependent humidity to match reference lab conditions
+        rh  = _rh_profile(Ta)
+        r  = run_body_thermoregulation(bb, base_micro(Ta; rh = rh); V_air = 0.1u"m/s")
         ef = r.endotherm_out.energy_fluxes
         mf = r.endotherm_out.mass_fluxes
         tr = r.endotherm_out.thermoregulation
