@@ -132,7 +132,7 @@ const K_FLESH_MAX     = 2.8u"W/m/K"       # at full vasodilation
 const K_FLESH_STEP    = 0.1u"W/m/K"
 const FIBRE_DIAMETER  = 30.0e-6u"m"
 const FIBRE_LENGTH    = 23.9e-3u"m"
-const FIBRE_DENSITY   = 5.0e8u"1/m^2"
+const FIBRE_DENSITY   = 5.0e7u"1/m^2"  # 5×10^7 /m²  (budgerigar ref: 5000e+04)
 const FIBRE_CONDUCT   = 0.209u"W/m/K"
 const FAT_FRACTION    = 0.05
 const FAT_DENSITY     = 901.0u"kg/m^3"
@@ -148,14 +148,14 @@ const VF_BUSH         = 0.0
 const VENTRAL_FRAC    = 0.5
 const GROUND_ALBEDO   = 0.8
 const SKIN_WETNESS    = 0.005
-const SKIN_WETNESS_MAX  = 1.0
-const SKIN_WETNESS_STEP = 0.001
-const T_CORE_DEFAULT  = 312.15u"K"               # 39 °C
-const T_CORE_MAX      = T_CORE_DEFAULT + 2.0u"K"
+const SKIN_WETNESS_MAX  = 0.05    # realistic cap (budgerigar ref: 0.05)
+const SKIN_WETNESS_STEP = 0.0025
+const T_CORE_DEFAULT  = 311.15u"K"               # 38 °C  (budgerigar setpoint)
+const T_CORE_MAX      = T_CORE_DEFAULT + 5.0u"K" # 43 °C hyperthermia ceiling
 const T_CORE_STEP     = 0.1u"K"
-const PANT_MAX        = 10.0
-const PANT_STEP       = 0.1
-const PANT_MULT       = 1.05
+const PANT_MAX        = 15.0
+const PANT_STEP       = 0.01
+const PANT_MULT       = 1.0
 
 
 # =====================================================================
@@ -300,7 +300,7 @@ function build_heat_exchange_traits(bb::BirdBody;
                                     T_core              = T_CORE_DEFAULT,
                                     Q_basal             = nothing,
                                     metabolic_model     = McKechnieWolf(),
-                                    q10::Real           = 2.0,
+                                    q10::Real           = 1.0,   # 1.0 = no Q10 scaling in normal range (budgerigar ref)
                                     conduction_fraction::Real = 0.0,
                                     refl_dorsal::Real   = REFL_DORSAL,
                                     refl_ventral::Real  = REFL_VENTRAL,
@@ -314,9 +314,9 @@ function build_heat_exchange_traits(bb::BirdBody;
                                     insulation_wetness::Real = 0.0,
                                     eye_fraction::Real       = 0.0,
                                     bare_skin_fraction::Real = 0.0,
-                                    fO2_extract::Real        = 0.20,
+                                    fO2_extract::Real        = 0.25,  # budgerigar ref: 0.25
                                     rq::Real                 = 0.80,
-                                    Δ_breath                 = 0.0u"K",
+                                    Δ_breath                 = 5.0u"K",  # exhaled 5 K above inhaled (budgerigar ref)
                                     rh_exit::Real            = 1.0,
                                     pant_current::Real       = 1.0,
                                     k_flesh                  = K_FLESH,
@@ -431,14 +431,14 @@ the six sequential effectors:
 """
 function build_thermoregulation_limits(bb::BirdBody,
                                        phys::HeatExchangeTraits;
-                                       thermoregulation_mode = CoreAndPantingFirst(),
+                                       thermoregulation_mode = CorePantingSweatingFirst(),
                                        tolerance::Real       = 0.005,
                                        max_iterations::Int   = 1000,
                                        Q_minimum_ref         = nothing,
                                        insulation_depth_max  = bb.feather_depth,
                                        insulation_step::Real = 0.0,
-                                       shape_b_max::Real     = bb.axis_ratio,
-                                       shape_b_step::Real    = 0.0,
+                                       shape_b_max::Real     = 5.0,  # allow uncurling (budgerigar ref: 5.0)
+                                       shape_b_step::Real    = 0.1,
                                        k_flesh_max           = K_FLESH_MAX,
                                        k_flesh_step          = K_FLESH_STEP,
                                        T_core_max            = T_CORE_MAX,
@@ -530,13 +530,16 @@ function build_organism(bb::BirdBody;
                         Q_basal             = nothing,
                         metabolic_model     = McKechnieWolf(),
                         # Behaviour kwargs
-                        thermoregulation_mode = CoreAndPantingFirst(),
+                        thermoregulation_mode = CorePantingSweatingFirst(),
                         tolerance::Real       = 0.005,
                         max_iterations::Int   = 1000,
                         Q_minimum_ref         = nothing,
                         # Activity
                         activity              = Diurnal(),
-                        # Bucket for any other physiology kwarg
+                        # Kwargs forwarded to build_thermoregulation_limits
+                        # (e.g. pant_step, pant_multiplier, pant_max, shape_b_max, shape_b_step)
+                        thermoregulation_kwargs::NamedTuple = NamedTuple(),
+                        # Bucket for any other physiology kwarg → build_heat_exchange_traits
                         kwargs...)
     phys   = build_heat_exchange_traits(bb;
                                         T_core          = T_core,
@@ -547,7 +550,8 @@ function build_organism(bb::BirdBody;
                                            thermoregulation_mode = thermoregulation_mode,
                                            tolerance      = tolerance,
                                            max_iterations = max_iterations,
-                                           Q_minimum_ref  = Q_minimum_ref)
+                                           Q_minimum_ref  = Q_minimum_ref,
+                                           thermoregulation_kwargs...)
     behav  = BehavioralTraits(; thermoregulation = limits, activity = activity)
     return Organism(bb.body, OrganismTraits(Endotherm(), phys, behav))
 end
