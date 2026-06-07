@@ -991,17 +991,18 @@ let
     # T_core_max threshold for Q10 activation (budgerigar reference: 43 °C)
     # (handled automatically by run_body_thermoregulation — no manual q10 needed)
 
+    # Metabolic-chamber conditions matching Weathers (1976): no solar radiation,
+    # chamber walls and floor at air temperature (isothermal radiative environment).
     base_micro(T_air_C; rh = 0.30) = microclimate_at_altitude(
         altitude           = 30.0u"m",
         air_temperature    = T_air_C * u"°C",
-        ground_temperature = (T_air_C + 5.0) * u"°C",
-        sky_temperature    = (T_air_C - 10.0) * u"°C",
-        zenith_angle       = 60.0u"°",
-        global_radiation   = 200.0u"W/m^2",
-        diffuse_fraction   = 0.30,
+        ground_temperature = T_air_C * u"°C",   # chamber floor at T_air
+        sky_temperature    = T_air_C * u"°C",   # chamber walls at T_air
+        zenith_angle       = 20.0u"°",
+        global_radiation   = 0.0u"W/m^2",       # no solar in lab
+        diffuse_fraction   = 0,
         relative_humidity  = rh,
-        shade              = 1.0,           # shade out direct solar so the
-                                            # sweep is dominated by air temp
+        shade              = 0,
     )
 
     T_air_C = collect(range(0.0, 50.0; length = 23))
@@ -1025,9 +1026,9 @@ let
         mf = r.endotherm_out.mass_fluxes
         tr = r.endotherm_out.thermoregulation
         Q_gen[i]   = ustrip(u"W",   ef.Q_gen)
-        m_evap[i]  = 1e6 * ustrip(u"kg/s", mf.m_evap)             # mg/s
-        m_resp[i] = 1e6 * ustrip(u"kg/s", mf.m_resp)  # mg/s
-        m_sweat[i]   = 1e6 * ustrip(u"kg/s", mf.m_sweat)    # mg/s
+        m_evap[i]  = 3.6e6 * ustrip(u"kg/s", mf.m_evap)             # g/hr
+        m_resp[i] = 3.6e6 * ustrip(u"kg/s", mf.m_resp)  # g/hr
+        m_sweat[i]   = 3.6e6 * ustrip(u"kg/s", mf.m_sweat)    # g/hr
         T_core[i]  = ustrip(u"°C",  tr.T_core)
         T_skin[i]  = ustrip(u"°C",  tr.T_skin)
         T_insul[i] = ustrip(u"°C",  tr.T_insulation)
@@ -1037,7 +1038,7 @@ let
     if _PLOTS_AVAILABLE
         p1 = Plots.plot(T_air_C, Q_gen;  xlabel = "T_air [°C]", ylabel = "Metabolic rate [W]",
                         lw = 2, label = "Q_gen", title = "Metabolic rate")
-        p2 = Plots.plot(T_air_C, m_evap; xlabel = "T_air [°C]", ylabel = "Water loss [mg/s]",
+        p2 = Plots.plot(T_air_C, m_evap; xlabel = "T_air [°C]", ylabel = "Water loss [g/hr]",
                         lw = 2, label = "total",
                         title = "Evaporative water loss")
         Plots.plot!(p2, T_air_C, m_resp; lw = 2, label = "respiratory")
