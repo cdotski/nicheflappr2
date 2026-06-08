@@ -1161,13 +1161,26 @@ let
     V_mr_arr     = Vector{Float64}(undef, n)
     pant_arr     = Vector{Float64}(undef, n)
     wet_arr      = Vector{Float64}(undef, n)
+    # Evaporation breakdown (respiratory vs cutaneous) for diagnostics
+    Q_resp_arr   = Vector{Float64}(undef, n)   # latent + sensible from respiration
+    m_resp_arr   = Vector{Float64}(undef, n)   # respiratory water loss [g/s]
+    m_evap_arr   = Vector{Float64}(undef, n)   # cutaneous water loss [g/s]
+    T_skin_arr   = Vector{Float64}(undef, n)   # outer-surface skin temp [°C]
 
-    # Force maximum-dissipation physiology: pant_current/skin_wetness set at
-    # their ceilings AND step = 0.0 so the rule-based controller cannot lower
-    # them.  This makes the plot a true "maximum heat-loss capacity" envelope.
+    # Force maximum-dissipation physiology:
+    #   • pant_current = 15 and skin_wetness = 0.05 at ceilings; step = 0.0
+    #     so the rule-based controller cannot lower them.
+    #   • T_core = 44 °C  — maximum physiological hyperthermia for birds
+    #     (upper end of reported tolerance, ~43–46 °C).  Higher T_core raises
+    #     T_skin and T_insulation via the conduction chain, increasing Q_conv
+    #     and Q_LW and raising the exhaled vapour pressure for Q_resp.
+    #   • k_flesh = 2.8 W/m/K — full vasodilation (K_FLESH_MAX).  Removes
+    #     the tissue-conduction bottleneck so T_skin tracks T_core closely.
     max_organism_kwargs = (
         skin_wetness = 0.05,
         pant_current = 15.0,
+        T_core       = 44.0u"°C",        # hyperthermic core (max heat stress)
+        k_flesh      = 2.8u"W/m/K",      # full vasodilation (= K_FLESH_MAX)
         thermoregulation_kwargs = (
             pant_step         = 0.0,
             skin_wetness_step = 0.0,
@@ -1202,6 +1215,14 @@ let
         V_mr_arr[i] = ustrip(u"m/s", V_mr)
         pant_arr[i] = tr.pant
         wet_arr[i]  = tr.skin_wetness
+        # Evaporation breakdown — from mass_fluxes
+        mf = r.mass_fluxes
+        m_resp_arr[i] = ustrip(u"g/s", mf.m_resp)   # respiratory water loss
+        m_evap_arr[i] = ustrip(u"g/s", mf.m_evap)   # cutaneous water loss
+        # Approximate respiratory heat (latent only) for quick comparison:
+        # Q_resp ≈ m_resp × L_v ≈ m_resp_g/s × 2430 J/g (rest of Q_evaporation is cutaneous)
+        Q_resp_arr[i] = m_resp_arr[i] * 2430.0   # W (approximate)
+        T_skin_arr[i] = ustrip(u"°C", uconvert(u"°C", tr.T_skin))
     end
 
     # ── Confirm pant rate and skin wetness held at their maxima ──────
@@ -1213,6 +1234,18 @@ let
             wet_ok  ? "YES ✓" : "NO ✗")
     if !(pant_ok && wet_ok)
         @warn "Forced-max override failed for some mass" pant_arr wet_arr
+    end
+
+    # ── Evaporation breakdown diagnostic ──────────────────────────
+    # Respiratory water loss is capped in HeatExchange at 2.22e-3 × mass × 15 g/s
+    # (a numerical stabiliser from Welch 1980 deer-mouse data).  The cap scales
+    # as m^1.0 while the allometric ventilation scales as BMR^~0.635 — this
+    # creates a slope change that can look like a spike on the evaporation curve.
+    println("\n   Evaporation breakdown (approx latent-only Q_resp = m_resp × 2430 J/g):")
+    println("   mass[g]  T_skin[°C]   m_resp[g/s]   m_evap[g/s]  cap_limit[g/s]  Q_resp_approx[W]   Q_evap_total[W]")
+    for i in 1:n
+        cap = 2.22e-3 * mass_kg[i] * 15   # HeatExchange hard cap (g/s)
+        @printf "  %7.1f   %6.2f     %8.5f     %8.5f     %8.5f      %7.3f          %7.3f\n" (mass_kg[i]*1000) T_skin_arr[i] m_resp_arr[i] m_evap_arr[i] cap Q_resp_arr[i] Q_body_evap[i]
     end
 
     if _PLOTS_AVAILABLE
