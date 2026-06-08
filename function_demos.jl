@@ -1167,15 +1167,9 @@ let
     m_evap_arr   = Vector{Float64}(undef, n)   # cutaneous water loss [g/s]
     T_skin_arr   = Vector{Float64}(undef, n)   # outer-surface skin temp [°C]
 
-    # Force maximum-dissipation physiology:
-    #   • pant_current = 15 and skin_wetness = 0.05 at ceilings; step = 0.0
-    #     so the rule-based controller cannot lower them.
-    #   • T_core = 44 °C  — maximum physiological hyperthermia for birds
-    #     (upper end of reported tolerance, ~43–46 °C).  Higher T_core raises
-    #     T_skin and T_insulation via the conduction chain, increasing Q_conv
-    #     and Q_LW and raising the exhaled vapour pressure for Q_resp.
-    #   • k_flesh = 2.8 W/m/K — full vasodilation (K_FLESH_MAX).  Removes
-    #     the tissue-conduction bottleneck so T_skin tracks T_core closely.
+    # Force maximum-dissipation physiology: pant_current/skin_wetness set at
+    # their ceilings AND step = 0.0 so the rule-based controller cannot lower
+    # them.  This makes the plot a true "maximum heat-loss capacity" envelope.
     max_organism_kwargs = (
         skin_wetness = 0.05,
         pant_current = 15.0,
