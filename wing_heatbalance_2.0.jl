@@ -894,7 +894,7 @@ function compute_wingbeat_convection(kin::FlappingKinematics,
                                      air::AirProperties;
                                      n_steps::Int = 50,
                                      V_forward = 0.0u"m/s",
-                                     regime::PlateConvectionRegime = LaminarPlate())
+                                     regime::PlateConvectionRegime = MixedPlate())
     freq_Hz = isa(kin.frequency, Quantity) ? ustrip(u"Hz", kin.frequency) : kin.frequency
     period  = 1.0u"s" / freq_Hz
     times   = [(i - 1) * period / n_steps for i in 1:n_steps]

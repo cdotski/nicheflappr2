@@ -278,7 +278,7 @@ end
 let
     println("\n=== 5.1 Convection-only: AFPT vs Strouhal kinematics ========")
 
-    m_kg     = 0.05
+    m_kg     = 1
     T_wing   = 25.0u"°C"
     ΔT       = 3.0u"K"                      # air is 3 °C cooler than the wing
     T_air    = T_wing - ΔT
@@ -611,7 +611,7 @@ let
     
     # Fixed environmental conditions for fair comparison
     T_air   = 20.0u"°C"
-    T_wing  = 23.0u"°C"
+    T_wing  = 22.0u"°C"
     altitude = 30.0u"m"
     
     # Table header
@@ -629,6 +629,7 @@ let
                        n_elements   = 10,
                        n_steps      = 40,
                        freq_method      = Pennycuick2008MinPower(),
+
                        convection_model = MixedPlate())
         
         # Extract summary data (s.Q_mean_W = Q_conv_mean; s.q_per_m2 = Q_conv_mean / A_wing)
