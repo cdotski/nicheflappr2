@@ -286,7 +286,7 @@ let
     # Shared inputs ----------------------------------------------------
     wd   = build_wing_for_mass(m_kg; n_elements = 10)
     wt   = uniform_temperature(wd, T_wing)
-    air  = WingHeatBalance.air_properties(T_air)
+    air  = air_properties(T_air)
 
     bird = quick_afpt_bird(m_kg)
     V_mr = find_maximum_range_speed(bird)
@@ -449,84 +449,6 @@ let
     end
 end
 
-
-# ─────────────────────────────────────────────────────────────────────
-# 8. Interactive Makie panel — sweep microclimate + bird parameters
-#    (requires GLMakie; degrades gracefully otherwise)
-# ─────────────────────────────────────────────────────────────────────
-let
-    println("\n=== 8. Interactive Makie panel ==============================")
-
-    have_makie = try
-        @eval using GLMakie
-        true
-    catch
-        @info "GLMakie not available — interactive panel skipped."
-        false
-    end
-    have_makie || return
-
-    GLMakie.activate!()
-
-    fig = Figure(size = (1100, 720))
-    Label(fig[0, 1:2], "Wing heat balance — interactive"; fontsize = 18,
-          halign = :center)
-
-    # Sliders
-    sg = SliderGrid(fig[1, 1],
-        (label = "mass [g]",            range = 5:5:1500,   startvalue = 50),
-        (label = "T_air [°C]",          range = -10:1:45,   startvalue = 20),
-        (label = "T_wing [°C]",         range = 5:1:45,     startvalue = 35),
-        (label = "wind [m/s]",          range = 0.5:0.5:15, startvalue = 3),
-        (label = "global rad [W/m²]",   range = 0:50:1100,  startvalue = 800),
-        (label = "zenith [°]",          range = 0:5:90,     startvalue = 30),
-        (label = "RH [-]",              range = 0:0.05:1,   startvalue = 0.5),
-        tellheight = false,
-    )
-    s_m, s_Ta, s_Tw, s_V, s_G, s_Z, s_RH = sg.sliders
-
-    # Live result observable
-    result = lift(s_m.value, s_Ta.value, s_Tw.value, s_V.value,
-                  s_G.value, s_Z.value, s_RH.value) do mg, Ta, Tw, V, G, Z, RH
-        Q_for_mass(mg / 1000;
-                   T_air     = Ta * u"°C",
-                   T_wing    = Tw * u"°C",
-                   wind_speed = V * u"m/s",
-                   global_radiation = G * u"W/m^2",
-                   zenith_angle    = Z * u"°",
-                   relative_humidity = RH,
-                   n_elements = 8, n_steps = 24,
-                   freq_method = StrouhalFreq())
-    end
-
-    labels = ["Q_conv", "Q_solar", "Q_lw,in", "Q_lw,out", "Q_net (1 wing)", "Q_net (both)"]
-    vals = lift(result) do b
-        [ustrip(u"W", Q_conv_mean(b)),
-         ustrip(u"W", Q_solar_mean(b)),
-         ustrip(u"W", Q_lw_in_mean(b)),
-         ustrip(u"W", Q_lw_out_mean(b)),
-         ustrip(u"W", Q_net_mean(b)),
-         2 * ustrip(u"W", Q_net_mean(b))]
-    end
-
-    ax = Axis(fig[1, 2]; xticks = (1:length(labels), labels),
-              ylabel = "Q [W]", title = "Pathway breakdown",
-              xticklabelrotation = π/6)
-    barplot!(ax, 1:length(labels), vals; color = 1:length(labels),
-             colormap = :tab10)
-    hlines!(ax, [0]; color = :black, linestyle = :dash)
-
-    info = lift(result) do b
-        s = summarize(b)
-        string(
-            "f = ", round(s.f_Hz, digits = 2), " Hz  |  ",
-            "V_mr = ", round(s.V_mr, digits = 2), " m/s  |  ",
-            "P_mech = ", round(s.P_mech_W, digits = 3), " W")
-    end
-    Label(fig[2, 1:2], info; tellwidth = false)
-
-    display(fig)
-end
 
 
 # ─────────────────────────────────────────────────────────────────────
