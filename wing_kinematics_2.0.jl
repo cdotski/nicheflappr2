@@ -21,7 +21,9 @@ module WingKinematics
 
 using ..WingPlates
 using ..AFPT: estimate_frequency as _afpt_estimate_frequency,
-              reduced_frequency as _afpt_reduced_frequency
+              reduced_frequency as _afpt_reduced_frequency,
+              build_afpt_bird as _afpt_build_bird,
+              compute_flapping_power as _afpt_compute_power
 using Unitful
 
 
@@ -340,27 +342,36 @@ end
 # ═════════════════════════════════════════════════════════════════════
 
 """
-    build_kinematics_for_mass(m_kg, freq_method = StrouhalFreq();
-                              amp = StrouhalAmplitude(),
-                              stroke_plane_deg = 80.0,
+    build_kinematics_for_mass(m_kg, freq_method = Pennycuick2008MinPower();
+                              amp = nothing,
+                              stroke_plane_deg = nothing,
                               V_forward_ms = NaN) → FlappingKinematics
 
 Build a `FlappingKinematics` struct from body mass [kg].
 
 # Arguments
 - `m_kg`              : body mass [kg]
-- `freq_method`       : a `FreqScaling` instance (default `StrouhalFreq()`).
-                        For `StrouhalFreq`, supply `V_forward_ms` so the
-                        forward airspeed is known.
+- `freq_method`       : a `FreqScaling` instance.  Default is
+                        `Pennycuick2008MinPower()` — the same frequency
+                        formula used internally by afpt.
 - `amp`               : stroke half-amplitude — `Real` [°] or an
-                        `AmpScaling` instance (default `StrouhalAmplitude()`).
-- `stroke_plane_deg`  : stroke-plane angle from horizontal [°].
-- `V_forward_ms`      : forward airspeed [m/s] required by `StrouhalFreq`.
+                        `AmpScaling` instance.  `nothing` (default) uses
+                        the afpt power-minimised amplitude when
+                        `V_forward_ms` is provided, or `StrouhalAmplitude()`
+                        as a fallback when no speed is given.
+- `stroke_plane_deg`  : stroke-plane angle **from horizontal** [°].  `nothing`
+                        (default) derives the angle from the afpt power
+                        optimum, converting afpt's from-vertical convention:
+                        φ_horiz = 90° − φ_afpt.  Falls back to 70° (≈ 20°
+                        from vertical, typical at V_mr) when no speed is given.
+- `V_forward_ms`      : forward airspeed [m/s].  Required by `StrouhalFreq`;
+                        also drives the afpt-optimal amp / stroke-plane
+                        computation when those are left as `nothing`.
 """
 function build_kinematics_for_mass(m_kg::Real,
-                                   freq_method::FreqScaling = StrouhalFreq();
-                                   amp = StrouhalAmplitude(),
-                                   stroke_plane_deg::Real = 80.0,
+                                   freq_method::FreqScaling = Pennycuick2008MinPower();
+                                   amp = nothing,
+                                   stroke_plane_deg = nothing,
                                    V_forward_ms::Real = NaN)
     f_hz = if freq_method isa StrouhalFreq
         Vf = isnan(V_forward_ms) ? freq_method.V_forward_ms : V_forward_ms
@@ -368,10 +379,37 @@ function build_kinematics_for_mass(m_kg::Real,
     else
         wingbeat_hz(m_kg, freq_method)
     end
+
+    # Run the afpt optimal power solve once if either amp or stroke_plane
+    # are unset and a forward airspeed is available.
+    afpt_res = if (isnothing(amp) || isnothing(stroke_plane_deg)) && !isnan(V_forward_ms)
+        bird = _afpt_build_bird(m_kg, wing_span_m(m_kg); wingArea = wing_area_m2(m_kg))
+        _afpt_compute_power(bird, V_forward_ms; strokeplane = :opt)
+    else
+        nothing
+    end
+
+    amp_rad = if isnothing(amp)
+        # afpt optimal when V_forward known; Strouhal amplitude as fallback
+        afpt_res !== nothing ? deg2rad(afpt_res.amplitude) :
+                               deg2rad(amplitude_deg(m_kg, StrouhalAmplitude()))
+    else
+        deg2rad(amplitude_deg(m_kg, amp))
+    end
+
+    sp_rad = if isnothing(stroke_plane_deg)
+        # afpt returns angle from vertical; FlappingKinematics stores from horizontal.
+        # Convert: φ_from_horizontal = 90° − φ_afpt_from_vertical.
+        afpt_res !== nothing ? deg2rad(90.0 - afpt_res.strokeplane) :
+                               deg2rad(70.0)  # fallback ≈ 20° from vertical
+    else
+        deg2rad(float(stroke_plane_deg))
+    end
+
     return FlappingKinematics(
         frequency          = f_hz * u"Hz",
-        amplitude          = deg2rad(amplitude_deg(m_kg, amp)),
-        stroke_plane_angle = deg2rad(stroke_plane_deg),
+        amplitude          = amp_rad,
+        stroke_plane_angle = sp_rad,
     )
 end
 
