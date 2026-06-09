@@ -336,7 +336,9 @@ function Q_for_mass(m_kg::Real;
     # caller has provided their own.  This is the single place where
     # the previously-disconnected afpt optimisation is plumbed back
     # into the kinematics pipeline.
-    sp_used  = stroke_plane_deg === nothing ? float(result_mr.strokeplane) : float(stroke_plane_deg)
+    # afpt returns strokeplane as degrees from vertical; build_kinematics_for_mass
+    # expects degrees from horizontal when a numeric value is passed, so convert.
+    sp_used  = stroke_plane_deg === nothing ? (90.0 - float(result_mr.strokeplane)) : float(stroke_plane_deg)
     amp_used = amp === nothing ? AfptOptAmplitude(float(result_mr.amplitude)) : amp
 
     kin = build_kinematics_for_mass(m_kg, freq_method;

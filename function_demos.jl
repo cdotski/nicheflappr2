@@ -195,12 +195,12 @@ end
 let
     println("\n=== 5. Wing heat balance (single microclimate) ==============")
 
-    m_kg   = 0.10
+    m_kg   = 1.00
     h_fly  = 30.0u"m"
-    T_wing = 20.0u"°C"     # absolute wing surface temperature
+    T_wing = 25.0u"°C"     # absolute wing surface temperature
 
     micro = microclimate_at_altitude(altitude         = h_fly,
-                                     air_temperature    = 15.0u"°C",
+                                     air_temperature    = 23.0u"°C",
                                      ground_temperature = 25.0u"°C",
                                      sky_temperature    =  5.0u"°C",
                                      zenith_angle       = 10.0u"°",
@@ -280,7 +280,7 @@ let
 
     m_kg     = 1
     T_wing   = 25.0u"°C"
-    ΔT       = 3.0u"K"                      # air is 3 °C cooler than the wing
+    ΔT       = 2.0u"K"                      # air is 2 °C cooler than the wing
     T_air    = T_wing - ΔT
 
     # Shared inputs ----------------------------------------------------
