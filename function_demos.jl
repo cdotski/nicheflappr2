@@ -859,34 +859,41 @@ end
 #     so the BB controller cannot back them off.
 #   • wings held at T_air + 2 K (passive radiator/convector)
 #
+# Body and wings are solved INDEPENDENTLY then summed:
+#   Body: run_body_thermoregulation with V_mr as forced-convection wind
+#         speed; physiology forced to maximum dissipation state
+#         (pant = 15, skin_wetness = 0.05, full vasodilation).
+#   Wings: compute_wingbeat_heatbalance with uniform T_wing = T_air + 2 K,
+#          afpt-optimal kinematics at V_mr, MixedPlate convection.
+#
 # Five outgoing pathways summed (positive = heat dumped to environment).
 # Both longwave terms are NET (out − in) so they are directly comparable
 # to the (already-net) convection and evaporation terms:
-#   1. body convection           (Q_convection)
-#   2. body longwave NET         (Q_longwave_out − Q_longwave_in)
-#   3. body evaporation          (Q_evaporation; respiratory + cutaneous)
-#   4. wing convection           (2 × wing_fluxes.Q_conv_mean)
-#   5. wing longwave NET         (−2 × wing_fluxes.Q_lw_net_mean)
+#   1. body convection           (ef.Q_convection)
+#   2. body longwave NET         (ef.Q_longwave_out − ef.Q_longwave_in)
+#   3. body evaporation          (ef.Q_evaporation; respiratory + cutaneous)
+#   4. wing convection           (2 × wf.Q_conv_mean)
+#   5. wing longwave NET         (−2 × wf.Q_lw_net_mean)
 # ─────────────────────────────────────────────────────────────────────
 let
-    using .WholeAnimalHeatBalance: run_whole_animal
     println("\n=== 15. Max heat dissipation capacity vs body mass ===========")
 
-    # Wind-tunnel microclimate matching Ward et al. (1999) J. Exp. Biol. 202:1589-1602
-    # Starlings flying at 10.2 m/s, T_air = 22.8 °C, indoor Göttingen-type tunnel.
-    # Walls and floor are at air temperature (isothermal enclosure), no solar,
-    # lab relative humidity assumed 50 %.
-    arid_micro = microclimate_at_altitude(
+    # Wind-tunnel microclimate — Ward et al. (1999) J. Exp. Biol. 202:1589-1602
+    # T_air = 22.8 °C, isothermal enclosure, no solar, RH 50 %.
+    tunnel_micro = microclimate_at_altitude(
         altitude           = 0.0u"m",
         air_temperature    = 22.8u"°C",
-        ground_temperature = 22.8u"°C",   # tunnel floor ≈ T_air
-        sky_temperature    = 22.8u"°C",   # tunnel walls ≈ T_air
+        ground_temperature = 22.8u"°C",
+        sky_temperature    = 22.8u"°C",
         zenith_angle       = 60.0u"°",
-        global_radiation   = 0.0u"W/m^2", # indoor, no solar
+        global_radiation   = 0.0u"W/m^2",
         diffuse_fraction   = 0,
         relative_humidity  = 0.50,
         shade              = 1,
     )
+
+    T_air_K    = uconvert(u"K", tunnel_micro.air_temperature)
+    T_wing_K   = T_air_K + 2.0u"K"           # wings 2 K above air
 
     # Log-spaced mass sweep, 10 g – 5 kg
     mass_kg = exp10.(range(log10(0.010), log10(5.0); length = 14))
@@ -901,20 +908,15 @@ let
     V_mr_arr     = Vector{Float64}(undef, n)
     pant_arr     = Vector{Float64}(undef, n)
     wet_arr      = Vector{Float64}(undef, n)
-    # Evaporation breakdown (respiratory vs cutaneous) for diagnostics
-    Q_resp_arr   = Vector{Float64}(undef, n)   # latent + sensible from respiration
-    m_resp_arr   = Vector{Float64}(undef, n)   # respiratory water loss [g/s]
-    m_evap_arr   = Vector{Float64}(undef, n)   # cutaneous water loss [g/s]
-    T_skin_arr   = Vector{Float64}(undef, n)   # outer-surface skin temp [°C]
 
-    # Force maximum-dissipation physiology: pant_current/skin_wetness set at
-    # their ceilings AND step = 0.0 so the rule-based controller cannot lower
-    # them.  This makes the plot a true "maximum heat-loss capacity" envelope.
-    max_organism_kwargs = (
+    # Maximum-dissipation body physiology: pant and skin_wetness at
+    # their ceilings, steps = 0 so the BB controller cannot lower them,
+    # full vasodilation, hyperthermic core.
+    max_body_kwargs = (
         skin_wetness = 0.05,
         pant_current = 15.0,
-        T_core       = 44.0u"°C",        # hyperthermic core (max heat stress)
-        k_flesh      = 2.8u"W/m/K",      # full vasodilation (= K_FLESH_MAX)
+        T_core       = 44.0u"°C",
+        k_flesh      = 2.8u"W/m/K",
         thermoregulation_kwargs = (
             pant_step         = 0.0,
             skin_wetness_step = 0.0,
@@ -922,72 +924,62 @@ let
     )
 
     for (i, m) in enumerate(mass_kg)
-        bb   = build_body_for_mass(m)
         V_mr = afpt_v_mr(m) * u"m/s"
-        r    = run_whole_animal(bb, arid_micro; V_air = V_mr,
-                                organism_kwargs = max_organism_kwargs)
+        V_ms = ustrip(u"m/s", V_mr)
 
-        ef = r.energy_fluxes
-        wf = r.wing_fluxes
-        tr = r.thermoregulation
+        # ── BODY ────────────────────────────────────────────────────
+        # run_body_thermoregulation uses V_mr as the wind speed for
+        # body convection (overrides micro.wind_speed via build_environment).
+        bb   = build_body_for_mass(m)
+        br   = run_body_thermoregulation(bb, tunnel_micro;
+                                         V_air           = V_mr,
+                                         organism_kwargs = max_body_kwargs)
+        ef   = br.endotherm_out.energy_fluxes
+        tr   = br.endotherm_out.thermoregulation
 
-        # Body — sign convention from HeatExchange: positive Q_X = loss.
-        # Longwave converted to NET (out − in) to be comparable with the
-        # other (already net) loss terms.
         Q_body_conv[i] = ustrip(u"W", ef.Q_convection)
         Q_body_lw[i]   = ustrip(u"W", ef.Q_longwave_out - ef.Q_longwave_in)
         Q_body_evap[i] = ustrip(u"W", ef.Q_evaporation)
+        pant_arr[i]    = tr.pant
+        wet_arr[i]     = tr.skin_wetness
 
-        # Wings — one wing returned; double for both wings.
-        # wf.Q_lw_net_mean is defined as (in − out), so negate to get
-        # "positive = net loss".
+        # ── WINGS ───────────────────────────────────────────────────
+        # Afpt-optimal kinematics at V_mr; uniform T_wing = T_air + 2 K;
+        # MixedPlate convection (our flat-plate correlation).
+        wd = build_wing_for_mass(m; n_elements = 10)
+        wt = uniform_temperature(wd, T_wing_K)
+        kk = build_kinematics_for_mass(m; V_forward_ms = V_ms)
+        wf = compute_wingbeat_heatbalance(kk, wd, wt, tunnel_micro;
+                                          n_steps          = 40,
+                                          V_forward        = V_mr,
+                                          convection_model = MixedPlate())
+
+        # wf.Q_lw_net_mean = Q_lw_in − Q_lw_out (wing struct convention),
+        # so negate to get "positive = net loss to environment".
         Q_wing_conv[i] = 2 * ustrip(u"W", wf.Q_conv_mean)
         Q_wing_lw[i]   = -2 * ustrip(u"W", wf.Q_lw_net_mean)
 
         Q_total[i]  = Q_body_conv[i] + Q_body_lw[i] + Q_body_evap[i] +
                       Q_wing_conv[i] + Q_wing_lw[i]
-        V_mr_arr[i] = ustrip(u"m/s", V_mr)
-        pant_arr[i] = tr.pant
-        wet_arr[i]  = tr.skin_wetness
-        # Evaporation breakdown — from mass_fluxes
-        mf = r.mass_fluxes
-        m_resp_arr[i] = ustrip(u"g/s", mf.m_resp)   # respiratory water loss
-        m_evap_arr[i] = ustrip(u"g/s", mf.m_evap)   # cutaneous water loss
-        # Approximate respiratory heat (latent only) for quick comparison:
-        # Q_resp ≈ m_resp × L_v ≈ m_resp_g/s × 2430 J/g (rest of Q_evaporation is cutaneous)
-        Q_resp_arr[i] = m_resp_arr[i] * 2430.0   # W (approximate)
-        T_skin_arr[i] = ustrip(u"°C", uconvert(u"°C", tr.T_skin))
+        V_mr_arr[i] = V_ms
     end
 
-    # ── Confirm pant rate and skin wetness held at their maxima ──────
-    pant_ok = all(p -> isapprox(p, 15.0; atol = 1e-6),  pant_arr)
-    wet_ok  = all(w -> isapprox(w, 0.05; atol = 1e-8),  wet_arr)
-    println("   pant rate     held at max (15.0)  for every mass : ",
+    # ── Confirm pant / sweat held at their maxima ────────────────────
+    pant_ok = all(p -> isapprox(p, 15.0; atol = 1e-6), pant_arr)
+    wet_ok  = all(w -> isapprox(w, 0.05; atol = 1e-8), wet_arr)
+    println("   pant rate    held at max (15.0) for every mass : ",
             pant_ok ? "YES ✓" : "NO ✗")
-    println("   skin wetness  held at max (0.05) for every mass : ",
+    println("   skin wetness held at max (0.05) for every mass : ",
             wet_ok  ? "YES ✓" : "NO ✗")
     if !(pant_ok && wet_ok)
         @warn "Forced-max override failed for some mass" pant_arr wet_arr
     end
 
-    # ── Evaporation breakdown diagnostic ──────────────────────────
-    # Respiratory water loss is capped in HeatExchange at 2.22e-3 × mass × 15 g/s
-    # (a numerical stabiliser from Welch 1980 deer-mouse data).  The cap scales
-    # as m^1.0 while the allometric ventilation scales as BMR^~0.635 — this
-    # creates a slope change that can look like a spike on the evaporation curve.
-    println("\n   Evaporation breakdown (approx latent-only Q_resp = m_resp × 2430 J/g):")
-    println("   mass[g]  T_skin[°C]   m_resp[g/s]   m_evap[g/s]  cap_limit[g/s]  Q_resp_approx[W]   Q_evap_total[W]")
-    for i in 1:n
-        cap = 2.22e-3 * mass_kg[i] * 15   # HeatExchange hard cap (g/s)
-        @printf "  %7.1f   %6.2f     %8.5f     %8.5f     %8.5f      %7.3f          %7.3f\n" (mass_kg[i]*1000) T_skin_arr[i] m_resp_arr[i] m_evap_arr[i] cap Q_resp_arr[i] Q_body_evap[i]
-    end
-
     if _PLOTS_AVAILABLE
         p = Plots.plot(
             mass_kg .* 1000, Q_total;
-          #  xscale = :log10, yscale = :log10,
             xlabel = "body mass [g]", ylabel = "heat dissipation [W]",
-            lw     = 3, color = :black, label = "total",
+            lw = 3, color = :black, label = "total",
             title  = "Max heat dissipation vs mass\n" *
                      "(Ward et al. 1999 tunnel: T_air = 22.8 °C, RH = 50 %, " *
                      "isothermal walls, no solar; flying at V_mr)",
@@ -1005,10 +997,10 @@ let
                     color = :orange, linestyle = :dash, label = "wing longwave (net)")
         display(p)
     else
-        println("   m[g]    V_mr     Q_b_conv   Q_b_lw   Q_b_evap   " *
-                "Q_w_conv   Q_w_lw   Q_total   pant   wet")
+        println("   m[g]    V_mr   Q_b_conv  Q_b_lw  Q_b_evap  " *
+                "Q_w_conv  Q_w_lw   Q_total  pant   wet")
         for i in 1:n
-            @printf "  %7.1f  %5.2f   %7.3f  %7.3f  %7.3f   %7.3f   %7.3f   %7.3f  %5.2f  %5.4f\n" (
+            @printf "  %7.1f  %5.2f  %7.3f  %7.3f  %7.3f  %7.3f  %7.3f  %7.3f  %5.2f  %5.4f\n" (
                 mass_kg[i]*1000) V_mr_arr[i] Q_body_conv[i] Q_body_lw[i] (
                 Q_body_evap[i]) Q_wing_conv[i] Q_wing_lw[i] Q_total[i] (
                 pant_arr[i]) wet_arr[i]
