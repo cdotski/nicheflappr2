@@ -746,7 +746,7 @@ let
     )
 
     T_air_C = collect(range(0.0, 50.0; length = 23))
-    bb      = build_body_for_mass(0.034)    # canonical budgie
+    bb      = build_body_for_mass(0.034)    # canonical budgie 0.034 kg
 
     n        = length(T_air_C)
     Q_gen    = Vector{Float64}(undef, n)
@@ -799,12 +799,249 @@ let
     end
 end
 
-
 # ─────────────────────────────────────────────────────────────────────
-# 14. Body thermoregulation — same 100 g bird across three microclimates
+# 14. Testing mass-made bodies against Conradie data
+# ─────────────────────────────────────────────────────────────────────
+# Sweeps T_air over the bird's tolerable range and plots:
+#   (a) metabolic rate (Q_gen)
+#   (b) evaporative water loss (total, respiratory, and cutaneous)
+#   (c) body temperatures (T_core / T_skin / T_insulation)
+#   (d) panting multiplier and minute ventilation
 # ─────────────────────────────────────────────────────────────────────
 let
-    println("\n=== 16. Body thermoregulation — 100 g bird cold/temp/hot =====")
+    println("\n=== 13. 4-panel: bird vs T_air =============")
+
+
+    # Standard metabolic-chamber conditions, with
+    # chamber walls and floor at air temperature (isothermal radiative environment).
+    base_micro(T_air_C; rh = 0.05) = microclimate_at_altitude(
+        altitude           = 1.0u"m",
+        air_temperature    = T_air_C * u"°C",
+        ground_temperature = T_air_C * u"°C",   # chamber floor at T_air
+        sky_temperature    = T_air_C * u"°C",   # chamber walls at T_air
+        zenith_angle       = 20.0u"°",
+        global_radiation   = 0.0u"W/m^2",       # no solar in lab
+        diffuse_fraction   = 0,
+        relative_humidity  = 0.05,       # 5% RH to match Conradie et al. (2023) 
+        shade              = 0,
+    )
+
+    T_air_C = collect(range(0.0, 50.0; length = 23))
+    bb      = build_body_for_mass(0.2)    # change the mass 
+
+    n        = length(T_air_C)
+    Q_gen    = Vector{Float64}(undef, n)
+    m_evap   = Vector{Float64}(undef, n)
+    m_resp = Vector{Float64}(undef, n)
+    m_sweat   = Vector{Float64}(undef, n)
+    T_core   = Vector{Float64}(undef, n)
+    T_skin   = Vector{Float64}(undef, n)
+    T_insul  = Vector{Float64}(undef, n)
+    vent     = Vector{Float64}(undef, n)
+
+    for (i, Ta) in enumerate(T_air_C)
+        # Apply temperature-dependent humidity to match reference lab conditions
+        rh  = 0.05
+        r  = run_body_thermoregulation(bb, base_micro(Ta; rh = rh); V_air = 0.01u"m/s")
+        ef = r.endotherm_out.energy_fluxes
+        mf = r.endotherm_out.mass_fluxes
+        tr = r.endotherm_out.thermoregulation
+        Q_gen[i]   = ustrip(u"W",   ef.Q_gen)
+        m_evap[i]  = 3.6e6 * ustrip(u"kg/s", mf.m_evap)             # g/hr
+        m_resp[i] = 3.6e6 * ustrip(u"kg/s", mf.m_resp)  # g/hr
+        m_sweat[i]   = 3.6e6 * ustrip(u"kg/s", mf.m_sweat)    # g/hr
+        T_core[i]  = ustrip(u"°C",  tr.T_core)
+        T_skin[i]  = ustrip(u"°C",  tr.T_skin)
+        T_insul[i] = ustrip(u"°C",  tr.T_insulation)
+        vent[i]    = 60 * 1000 * 1000 * ustrip(u"m^3/s", mf.V_air)        # ml/min     
+    end
+
+    if _PLOTS_AVAILABLE
+        p1 = Plots.plot(T_air_C, Q_gen;  xlabel = "T_air [°C]", ylabel = "Metabolic rate [W]",
+                        lw = 2, label = "Q_gen", title = "Metabolic rate")
+        p2 = Plots.plot(T_air_C, m_evap; xlabel = "T_air [°C]", ylabel = "Water loss [g/hr]",
+                        lw = 2, label = "total",
+                        title = "Evaporative water loss")
+        Plots.plot!(p2, T_air_C, m_resp; lw = 2, label = "respiratory")
+        Plots.plot!(p2, T_air_C, m_sweat;  lw = 2, label = "cutaneous")
+        p3 = Plots.plot(T_air_C, [T_core T_skin T_insul];
+                        xlabel = "T_air [°C]", ylabel = "T [°C]",
+                        lw = 2, label = ["T_core" "T_skin" "T_insulation"],
+                        title = "Body temperatures")
+        p4 = Plots.plot(T_air_C, vent; xlabel = "T_air [°C]", ylabel = "Ventilation [ml/min]",
+                        lw = 2, label = "ventilation", title = "Ventilation rate")
+        display(Plots.plot(p1, p2, p3, p4; layout = (2, 2), size = (1000, 800)))
+    else
+        println("  T_air  Q_gen  m_evap  m_resp  m_sweat  T_core  T_skin  T_insul vent")
+        for i in 1:2:n
+            @printf "  %5.1f  %5.3f  %6.3f  %6.3f  %6.3f  %6.2f  %6.2f  %6.2f  %6.2f\n" (
+                T_air_C[i], Q_gen[i], m_evap[i], m_resp[i], m_sweat[i], T_core[i], T_skin[i], T_insul[i], vent[i])
+        end
+    end
+end
+
+# ─────────────────────────────────────────────────────────────────────
+# 14b. Budgie (34 g) — explicit parameter demo, Conradie chamber conditions
+# ─────────────────────────────────────────────────────────────────────
+# Same temperature sweep (0–50 °C) as demo 14 but every default is
+# written out explicitly so individual parameters are easy to tweak.
+# ─────────────────────────────────────────────────────────────────────
+let
+    println("\n=== 14b. Budgie explicit-parameter demo (Conradie conditions) =")
+
+    # ── Body mass ─────────────────────────────────────────────────
+    m_kg = 0.034    # kg  (budgerigar, Conradie et al. 2023)
+
+    # ── Morphometrics ─────────────────────────────────────────────
+    # axis_ratio_allometry(0.034) ≈ 1.1  (near-spherical small passerine)
+    axis_ratio      = 1.1
+    # feather_depth_allometry(0.034) ≈ 0.00566 m  (d_f = 0.01737 · m^0.33)
+    feather_depth_m = 0.01737 * m_kg^0.33
+    ρ_flesh         = 1000.0u"kg/m^3"   # body density
+    fibre_diameter  = 30.0e-6u"m"       # feather fibre diameter
+    fibre_density   = 5.0e7u"1/m^2"     # feather fibre density  (5×10⁷ /m²)
+    fat_fraction    = 0.05               # fractional fat layer
+    fat_density     = 901.0u"kg/m^3"
+
+    bb = build_body_for_mass(m_kg;
+        axis_ratio      = axis_ratio,
+        feather_depth_m = feather_depth_m,
+        ρ_flesh         = ρ_flesh,
+        fibre_diameter  = fibre_diameter,
+        fibre_density   = fibre_density,
+        fat_fraction    = fat_fraction,
+        fat_density     = fat_density,
+    )
+
+    # ── Chamber microclimate (Conradie et al. 2023 conditions) ────
+    # Isothermal radiative environment (walls = floor = air), no solar,
+    # 5 % RH, effectively still air (0.01 m/s).
+    base_micro(T_air_C) = microclimate_at_altitude(
+        altitude           = 1.0u"m",
+        air_temperature    = T_air_C * u"°C",
+        ground_temperature = T_air_C * u"°C",   # chamber floor at T_air
+        sky_temperature    = T_air_C * u"°C",   # chamber walls at T_air
+        zenith_angle       = 20.0u"°",
+        global_radiation   = 0.0u"W/m^2",       # no solar
+        diffuse_fraction   = 0,
+        relative_humidity  = 0.05,               # 5 % RH
+        shade              = 0,
+    )
+    V_air = 0.01u"m/s"   # still-air chamber
+
+    # ── Heat budget parameters ────────────────────────────────────
+    T_core          = 311.15u"K"     # 38 °C normothermic setpoint
+    Q_basal         = nothing        # nothing → McKechnieWolf() allometry
+    q10             = 1.0            # no Q10 scaling in normothermic range
+    Δ_breath        = 5.0u"K"        # exhaled air above inhaled
+    fO2_extract     = 0.25           # O₂ extraction efficiency
+    rq              = 0.80           # respiratory quotient
+    rh_exit         = 1.0            # exhaled air saturated
+    k_flesh         = 0.9u"W/m/K"   # flesh conductivity (pre-vasodilation)
+    refl_dorsal     = 0.248          # dorsal feather reflectance
+    refl_ventral    = 0.351          # ventral feather reflectance
+    emiss_body      = 0.99           # body emissivity
+
+    # ── Water budget / panting parameters ─────────────────────────
+    skin_wetness       = 0.005       # baseline cutaneous evaporation fraction
+    skin_wetness_max   = 0.05        # maximum (Conradie ref: 0.05)
+    skin_wetness_step  = 0.0025      # increment per thermoregulation step
+    pant_current       = 1.0         # starting pant multiplier
+    pant_max           = 15.0        # maximum pant multiplier
+    pant_step          = 0.01        # increment per thermoregulation step
+    pant_multiplier    = 1.0         # cost multiplier on panting metabolic load
+
+    # ── Thermoregulation limits ────────────────────────────────────
+    T_core_max   = T_core + 5.0u"K"  # 43 °C hyperthermia ceiling
+    T_core_step  = 0.1u"K"
+    k_flesh_max  = 2.8u"W/m/K"       # full vasodilation
+    k_flesh_step = 0.1u"W/m/K"
+
+    # ── Temperature sweep ─────────────────────────────────────────
+    T_air_C = collect(range(0.0, 50.0; length = 23))
+    n       = length(T_air_C)
+
+    Q_gen   = Vector{Float64}(undef, n)
+    m_evap  = Vector{Float64}(undef, n)
+    m_resp  = Vector{Float64}(undef, n)
+    m_sweat = Vector{Float64}(undef, n)
+    T_core_out  = Vector{Float64}(undef, n)
+    T_skin_out  = Vector{Float64}(undef, n)
+    T_insul_out = Vector{Float64}(undef, n)
+    vent    = Vector{Float64}(undef, n)
+
+    for (i, Ta) in enumerate(T_air_C)
+        r = run_body_thermoregulation(bb, base_micro(Ta);
+            V_air = V_air,
+            organism_kwargs = (
+                T_core         = T_core,
+                Q_basal        = Q_basal,
+                q10            = q10,
+                Δ_breath       = Δ_breath,
+                fO2_extract    = fO2_extract,
+                rq             = rq,
+                rh_exit        = rh_exit,
+                k_flesh        = k_flesh,
+                refl_dorsal    = refl_dorsal,
+                refl_ventral   = refl_ventral,
+                emiss_body     = emiss_body,
+                skin_wetness   = skin_wetness,
+                pant_current   = pant_current,
+                thermoregulation_kwargs = (
+                    T_core_max        = T_core_max,
+                    T_core_step       = T_core_step,
+                    k_flesh_max       = k_flesh_max,
+                    k_flesh_step      = k_flesh_step,
+                    pant_max          = pant_max,
+                    pant_step         = pant_step,
+                    pant_multiplier   = pant_multiplier,
+                    skin_wetness_max  = skin_wetness_max,
+                    skin_wetness_step = skin_wetness_step,
+                ),
+            ),
+        )
+        ef = r.endotherm_out.energy_fluxes
+        mf = r.endotherm_out.mass_fluxes
+        tr = r.endotherm_out.thermoregulation
+        Q_gen[i]      = ustrip(u"W",   ef.Q_gen)
+        m_evap[i]     = 3.6e6 * ustrip(u"kg/s", mf.m_evap)
+        m_resp[i]     = 3.6e6 * ustrip(u"kg/s", mf.m_resp)
+        m_sweat[i]    = 3.6e6 * ustrip(u"kg/s", mf.m_sweat)
+        T_core_out[i] = ustrip(u"°C",  tr.T_core)
+        T_skin_out[i] = ustrip(u"°C",  tr.T_skin)
+        T_insul_out[i]= ustrip(u"°C",  tr.T_insulation)
+        vent[i]       = 60 * 1000 * 1000 * ustrip(u"m^3/s", mf.V_air)
+    end
+
+    if _PLOTS_AVAILABLE
+        p1 = Plots.plot(T_air_C, Q_gen;  xlabel = "T_air [°C]", ylabel = "Metabolic rate [W]",
+                        lw = 2, label = "Q_gen", title = "Metabolic rate")
+        p2 = Plots.plot(T_air_C, m_evap; xlabel = "T_air [°C]", ylabel = "Water loss [g/hr]",
+                        lw = 2, label = "total", title = "Evaporative water loss")
+        Plots.plot!(p2, T_air_C, m_resp;  lw = 2, label = "respiratory")
+        Plots.plot!(p2, T_air_C, m_sweat; lw = 2, label = "cutaneous")
+        p3 = Plots.plot(T_air_C, [T_core_out T_skin_out T_insul_out];
+                        xlabel = "T_air [°C]", ylabel = "T [°C]",
+                        lw = 2, label = ["T_core" "T_skin" "T_insulation"],
+                        title = "Body temperatures")
+        p4 = Plots.plot(T_air_C, vent; xlabel = "T_air [°C]", ylabel = "Ventilation [ml/min]",
+                        lw = 2, label = "ventilation", title = "Ventilation rate")
+        display(Plots.plot(p1, p2, p3, p4; layout = (2, 2), size = (1000, 800)))
+    else
+        println("  T_air  Q_gen  m_evap  m_resp  m_sweat  T_core  T_skin  T_insul  vent")
+        for i in 1:2:n
+            @printf "  %5.1f  %5.3f  %6.3f  %6.3f  %6.3f  %6.2f  %6.2f  %6.2f  %6.2f\n" (
+                T_air_C[i], Q_gen[i], m_evap[i], m_resp[i], m_sweat[i],
+                T_core_out[i], T_skin_out[i], T_insul_out[i], vent[i])
+        end
+    end
+end
+
+# ─────────────────────────────────────────────────────────────────────
+# 15. Body thermoregulation — same 100 g bird across three microclimates
+# ─────────────────────────────────────────────────────────────────────
+let
+    println("\n=== 15. Body thermoregulation — 100 g bird cold/temp/hot =====")
 
     envs = (
         cold      = microclimate_at_altitude(altitude = 30.0u"m",
@@ -847,7 +1084,7 @@ end
 
 
 # ─────────────────────────────────────────────────────────────────────
-# 15. Maximum heat dissipation capacity vs body mass
+# 16. Maximum heat dissipation capacity vs body mass
 # ─────────────────────────────────────────────────────────────────────
 # At each body mass:
 #   • bird flies at V_mr (AFPT maximum-range speed) — sets body wind speed
@@ -876,7 +1113,7 @@ end
 #   5. wing longwave NET         (−2 × wf.Q_lw_net_mean)
 # ─────────────────────────────────────────────────────────────────────
 let
-    println("\n=== 15. Max heat dissipation capacity vs body mass ===========")
+    println("\n=== 16. Max heat dissipation capacity vs body mass ===========")
 
     # Wind-tunnel microclimate — Ward et al. (1999) J. Exp. Biol. 202:1589-1602
     # T_air = 22.8 °C, isothermal enclosure, no solar, RH 50 %.
