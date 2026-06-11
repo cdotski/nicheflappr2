@@ -42,6 +42,7 @@ using ..AFPT: AfptBird, build_afpt_bird, compute_flapping_power,
               wing_span_allometry, wing_area_allometry,
               compute_body_frontal_area, estimate_frequency,
               estimate_basal_metabolic_rate
+using FluidProperties: dry_air_properties, GasFractions
 using Unitful
 using Printf
 
@@ -287,9 +288,15 @@ function Q_for_mass(m_kg::Real;
                            shade                = shade,
                            altitude             = altitude) :
             microclimate
-    air = air_properties(T_air; altitude = altitude, P = micro.atmospheric_pressure)
-    ρ   = ustrip(u"kg/m^3", air.ρ)
-    ν   = ustrip(u"m^2/s",  air.ν)
+    # Derive ρ and ν directly from the microclimate (same path as afpt_v_mr)
+    # so that Q_for_mass and afpt_v_mr agree to floating-point precision.
+    _fp = dry_air_properties(uconvert(u"K",  micro.air_temperature),
+                             uconvert(u"Pa", micro.atmospheric_pressure);
+                             gasfrac = GasFractions())
+    ρ   = ustrip(u"kg/m^3", _fp.density)
+    ν   = ustrip(u"m^2/s",  _fp.kinematic_viscosity)
+    air = air_properties(micro.air_temperature; P = micro.atmospheric_pressure,
+                         gasfrac = micro.gas_fractions)
 
     # ── AFPT bird (allometric defaults, override only if requested) ─
     b_used  = wing_span         === nothing ? wing_span_allometry(m_kg)                    : float(wing_span)
@@ -341,7 +348,13 @@ function Q_for_mass(m_kg::Real;
     sp_used  = stroke_plane_deg === nothing ? (90.0 - float(result_mr.strokeplane)) : float(stroke_plane_deg)
     amp_used = amp === nothing ? AfptOptAmplitude(float(result_mr.amplitude)) : amp
 
-    kin = build_kinematics_for_mass(m_kg, freq_method;
+    # If the caller supplied Pennycuick2008MinPower() (standard-atm default),
+    # rebake it with the microclimate's actual ρ so kinematics frequency matches
+    # the frequency baked into the AFPT bird struct above.
+    freq_method_used = freq_method isa Pennycuick2008MinPower ?
+                       Pennycuick2008MinPower(ρ) : freq_method
+
+    kin = build_kinematics_for_mass(m_kg, freq_method_used;
               amp = amp_used, stroke_plane_deg = sp_used,
               V_forward_ms = V_mr)
 

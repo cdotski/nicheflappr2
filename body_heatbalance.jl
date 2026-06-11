@@ -56,7 +56,7 @@ using ..FlightEnvironment
 using ..FlightEnvironment: Microclimate
 using ..AFPT
 using ..AFPT: build_afpt_bird, wing_span_allometry, wing_area_allometry,
-              find_maximum_range_speed
+              find_maximum_range_speed, estimate_frequency
 
 # ── BiophysicalEcology stack ─────────────────────────────────────────
 # BiophysicalGeometry: shape + insulation primitives that go into a
@@ -90,7 +90,7 @@ using BiophysicalBehaviour: BehavioralTraits, OrganismTraits, Endotherm,
                              thermoregulate, thermoregulation
 
 # FluidProperties: gas-mixture struct used by EnvironmentalPars.
-using FluidProperties: GasFractions
+using FluidProperties: GasFractions, dry_air_properties
 
 
 # =====================================================================
@@ -647,17 +647,41 @@ end
 # =====================================================================
 
 """
-    afpt_v_mr(m_kg; type = :other) → Float64 [m/s]
+    afpt_v_mr(m_kg; type = :other, micro = nothing) → Float64 [m/s]
 
 Maximum-range airspeed for a canonical-allometry AFPT bird at body
 mass `m_kg`.  Used as the default forced-convection wind speed for an
 in-flight body.
+
+When `micro` (a `Microclimate`) is supplied, air density ρ and kinematic
+viscosity ν are derived from its `air_temperature` and
+`atmospheric_pressure`.  Both the bird's `wingbeatFrequency` and the
+AFPT power solver receive the local ρ/ν, exactly matching the
+behaviour of `Q_for_mass`.  Without `micro` the AFPT solver uses its
+own standard-atmosphere defaults (~1.225 kg/m³).
 """
-function afpt_v_mr(m_kg::Real; type::Symbol = :other)
-    bird = build_afpt_bird(m_kg, wing_span_allometry(m_kg);
-                           wingArea = wing_area_allometry(m_kg),
-                           type     = type)
-    return find_maximum_range_speed(bird)
+function afpt_v_mr(m_kg::Real; type::Symbol = :other,
+                   micro::Union{Microclimate, Nothing} = nothing)
+    b = wing_span_allometry(m_kg)
+    S = wing_area_allometry(m_kg)
+    if micro === nothing
+        bird = build_afpt_bird(m_kg, b; wingArea = S, type = type)
+        return find_maximum_range_speed(bird)
+    else
+        T_K  = uconvert(u"K",  micro.air_temperature)
+        P_Pa = uconvert(u"Pa", micro.atmospheric_pressure)
+        fp   = dry_air_properties(T_K, P_Pa; gasfrac = GasFractions())
+        ρ    = ustrip(u"kg/m^3", fp.density)
+        ν    = ustrip(u"m^2/s",  fp.kinematic_viscosity)
+        f    = estimate_frequency(m_kg, b, S; ρ = ρ)
+        bird = build_afpt_bird(m_kg, b;
+                               wingArea          = S,
+                               type              = type,
+                               wingbeatFrequency = f)
+        return find_maximum_range_speed(bird; ρ = ρ, ν = ν,
+                                        V_lo = 2.0, V_hi = 50.0,
+                                        strokeplane = :opt)
+    end
 end
 
 

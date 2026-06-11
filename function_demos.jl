@@ -22,7 +22,8 @@ using .FlightEnvironment: Microclimate, microclimate_at_altitude
 using .AFPT: build_afpt_bird, compute_flight_performance,
              compute_flapping_power, find_maximum_range_speed,
              find_minimum_power_speed,
-             wing_span_allometry, wing_area_allometry
+             wing_span_allometry, wing_area_allometry,
+             estimate_frequency
 using Unitful
 using Printf
 
@@ -185,31 +186,36 @@ end
 # ─────────────────────────────────────────────────────────────────────
 # 5. Full heat balance over one wingbeat (single microclimate)
 #
-# Same configuration as demo 5.3 (100 g bird, AFPT-driven kinematics —
-# Pennycuick freq + afpt-optimised amplitude + afpt-optimised stroke-
-# plane — MixedPlate convection, T_wing = T_air + 1.5 K, evaluated at
-# h = 30 m above ground), but driven through `Q_for_mass` for ONE
-# microclimate so the full per-wingbeat snapshot stack
-# (`b.heat.snapshots`, `b.heat.*_series`) is available for plotting.
+# 100 g bird, AFPT-driven kinematics (Pennycuick freq + afpt-optimised
+# amplitude + afpt-optimised stroke-plane), MixedPlate convection.
+# Uses the SAME wind-tunnel microclimate as demo 16 (Ward et al. 1999:
+# T_air = 22.8 °C, isothermal walls, no solar, RH 50 %, alt = 0 m) with
+# T_wing = T_air + 2 K, so the 100 g convection number is directly
+# comparable across demos 5, 5.1, and 16.  Driven through `Q_for_mass`
+# so the per-wingbeat snapshot stack is available for plotting.
 # ─────────────────────────────────────────────────────────────────────
 let
     println("\n=== 5. Wing heat balance (single microclimate) ==============")
 
-    m_kg   = 1.00
-    h_fly  = 30.0u"m"
-    T_wing = 25.0u"°C"     # absolute wing surface temperature
+    m_kg   = 0.10
+    h_fly  = 0.0u"m"
+    T_air  = 22.8u"°C"
+    ΔT_wa  = 2.0u"K"
+    T_wing = uconvert(u"°C", uconvert(u"K", T_air) + ΔT_wa)
 
-    micro = microclimate_at_altitude(altitude         = h_fly,
-                                     air_temperature    = 23.0u"°C",
-                                     ground_temperature = 25.0u"°C",
-                                     sky_temperature    =  5.0u"°C",
-                                     zenith_angle       = 10.0u"°",
-                                     global_radiation   = 500.0u"W/m^2",
-                                     diffuse_fraction   = 0.20,
-                                     relative_humidity  = 0.50)
+    # Wind-tunnel microclimate — identical to demo 16 (Ward et al. 1999).
+    micro = microclimate_at_altitude(
+        altitude           = h_fly,
+        air_temperature    = T_air,
+        ground_temperature = T_air,
+        sky_temperature    = T_air,
+        zenith_angle       = 60.0u"°",
+        global_radiation   = 0.0u"W/m^2",
+        diffuse_fraction   = 0,
+        relative_humidity  = 0.50,
+        shade              = 1,
+    )
 
-    T_air = micro.air_temperature
-    ΔT_wa = uconvert(u"K", uconvert(u"K", T_wing) - uconvert(u"K", T_air))
 
     # AFPT-driven kinematics (amp + φ left as nothing ⇒ Q_for_mass uses
     # the afpt-optimised values).  Convection = MixedPlate (ours).
@@ -262,35 +268,59 @@ end
 # ─────────────────────────────────────────────────────────────────────
 # 5.1 Convection-only comparison: AFPT kinematics (new defaults) vs Strouhal
 #
-# Minimal environment — T_air is fixed 3 °C below the wing.  Everything
-# else (radiation, microclimate) is omitted so the only heat-loss
-# pathway is forced convection.  Both kinematics parameterisations are
-# fed the same wing geometry, the same forward airspeed (V_mr from
-# AFPT) and the same wing temperature; the only differences are the
-# frequency, amplitude and stroke-plane angle.
+# Uses the SAME wind-tunnel microclimate as demos 5 and 16 (Ward et al.
+# 1999: T_air = 22.8 °C, isothermal walls, no solar, RH 50 %, alt = 0 m)
+# with T_wing = T_air + 2 K.  Air properties are derived from the
+# microclimate (P, gas fractions) so the convection-only function gets
+# the same `AirProperties` that `compute_wingbeat_heatbalance` builds
+# internally — making the AFPT row directly comparable to demos 5 & 16.
 #
-# AFPT row uses the new build_kinematics_for_mass defaults: Pennycuick
-# frequency, afpt-optimal amplitude and stroke plane (converted from
-# afpt's from-vertical convention to our from-horizontal: φ_horiz = 90°−φ_afpt).
-# Strouhal row uses the old explicit parameters for direct comparison.
-# φ [°] column is from-horizontal throughout.
+# Both kinematics parameterisations are fed the same wing geometry,
+# the same forward airspeed (V_mr from AFPT) and the same wing
+# temperature; the only differences are the frequency, amplitude and
+# stroke-plane angle.  φ [°] column is from-horizontal throughout.
 # ─────────────────────────────────────────────────────────────────────
 let
     println("\n=== 5.1 Convection-only: AFPT vs Strouhal kinematics ========")
 
-    m_kg     = 1
-    T_wing   = 25.0u"°C"
-    ΔT       = 2.0u"K"                      # air is 2 °C cooler than the wing
-    T_air    = T_wing - ΔT
+    m_kg   = 0.1
+    T_air  = 22.8u"°C"
+    ΔT     = 2.0u"K"
+    T_wing = uconvert(u"°C", uconvert(u"K", T_air) + ΔT)
+
+    # Wind-tunnel microclimate — identical to demos 5 and 16.
+    micro = microclimate_at_altitude(
+        altitude           = 0.0u"m",
+        air_temperature    = T_air,
+        ground_temperature = T_air,
+        sky_temperature    = T_air,
+        zenith_angle       = 60.0u"°",
+        global_radiation   = 0.0u"W/m^2",
+        diffuse_fraction   = 0,
+        relative_humidity  = 0.50,
+        shade              = 1,
+    )
 
     # Shared inputs ----------------------------------------------------
     wd   = build_wing_for_mass(m_kg; n_elements = 10)
     wt   = uniform_temperature(wd, T_wing)
-    air  = air_properties(T_air)
+    # Build air from the microclimate so P, ρ, ν all match what
+    # compute_wingbeat_heatbalance and afpt_v_mr use.
+    air  = air_properties(micro.air_temperature;
+                          P       = micro.atmospheric_pressure,
+                          gasfrac = micro.gas_fractions)
+    ρ_air = ustrip(u"kg/m^3", air.ρ)
+    ν_air = ustrip(u"m^2/s",  air.ν)
 
-    bird = quick_afpt_bird(m_kg)
-    V_mr = find_maximum_range_speed(bird)
-    res  = compute_flapping_power(bird, V_mr; strokeplane = :opt)
+    # Build the AFPT bird with wingbeatFrequency at the local air density,
+    # and solve V_mr at the same ρ/ν — matching Q_for_mass and afpt_v_mr.
+    b_m  = wing_span_allometry(m_kg)
+    S_m2 = wing_area_allometry(m_kg)
+    bird = build_afpt_bird(m_kg, b_m; wingArea = S_m2,
+                           wingbeatFrequency = estimate_frequency(m_kg, b_m, S_m2; ρ = ρ_air))
+    V_mr = find_maximum_range_speed(bird; ρ = ρ_air, ν = ν_air,
+                                    V_lo = 2.0, V_hi = 50.0, strokeplane = :opt)
+    res  = compute_flapping_power(bird, V_mr; ρ = ρ_air, ν = ν_air, strokeplane = :opt)
 
     # AFPT kinematics: new defaults — Pennycuick2008MinPower freq +
     # afpt-optimal amp and stroke plane (φ convention converted inside)
@@ -1113,7 +1143,7 @@ end
 #   4. wing convection           (2 × wf.Q_conv_mean)
 #   5. wing longwave NET         (−2 × wf.Q_lw_net_mean)
 # ─────────────────────────────────────────────────────────────────────
-let
+#let
     println("\n=== 16. Max heat dissipation capacity vs body mass ===========")
 
     # Wind-tunnel microclimate — Ward et al. (1999) J. Exp. Biol. 202:1589-1602
@@ -1162,7 +1192,7 @@ let
     )
 
     for (i, m) in enumerate(mass_kg)
-        V_mr = afpt_v_mr(m) * u"m/s"
+        V_mr = afpt_v_mr(m; micro = tunnel_micro) * u"m/s"
         V_ms = ustrip(u"m/s", V_mr)
 
         # ── BODY ────────────────────────────────────────────────────
@@ -1244,7 +1274,32 @@ let
                 pant_arr[i]) wet_arr[i]
         end
     end
-end
+
+
+# Finding a given mass bird
+mass_kg # look at 6 = ~110g 
+Q_body_conv[6]
+Q_body_lw[6]
+Q_body_evap[6]
+Q_wing_conv[6]
+Q_wing_lw[6]
+
+one_wing = Q_wing_conv[6]/2
+
+
+
+m = 0.1
+wd = build_wing_for_mass(m; n_elements = 40)
+        wt = uniform_temperature(wd, T_wing_K)
+        kk = build_kinematics_for_mass(m; V_forward_ms = V_ms)
+        wf = compute_wingbeat_heatbalance(kk, wd, wt, tunnel_micro;
+                                          n_steps          = 40,
+                                          V_forward        = V_mr,
+                                          convection_model = MixedPlate())
+
+
+
+#end
 
 
 
