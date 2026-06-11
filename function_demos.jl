@@ -827,7 +827,7 @@ let
     )
 
     T_air_C = collect(range(0.0, 50.0; length = 23))
-    bb      = build_body_for_mass(0.2)    # change the mass 
+    bb      = build_body_for_mass(0.034)    # change the mass 
 
     n        = length(T_air_C)
     Q_gen    = Vector{Float64}(undef, n)
@@ -932,7 +932,9 @@ let
     # ── Heat budget parameters ────────────────────────────────────
     T_core          = 311.15u"K"     # 38 °C normothermic setpoint
     Q_basal         = nothing        # nothing → McKechnieWolf() allometry
-    q10             = 1.0            # no Q10 scaling in normothermic range
+    # q10 is intentionally NOT passed in organism_kwargs — the auto-Q10
+    # logic in run_body_thermoregulation switches to q10_hot=2.0 when
+    # T_air ≥ T_CORE_MAX, matching the behaviour of demo 14.
     Δ_breath        = 5.0u"K"        # exhaled air above inhaled
     fO2_extract     = 0.25           # O₂ extraction efficiency
     rq              = 0.80           # respiratory quotient
@@ -976,7 +978,6 @@ let
             organism_kwargs = (
                 T_core         = T_core,
                 Q_basal        = Q_basal,
-                q10            = q10,
                 Δ_breath       = Δ_breath,
                 fO2_extract    = fO2_extract,
                 rq             = rq,

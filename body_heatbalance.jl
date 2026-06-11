@@ -87,7 +87,7 @@ using BiophysicalBehaviour: BehavioralTraits, OrganismTraits, Endotherm,
                              CoreAndPantingFirst, CorePantingSweatingFirst,
                              ThermoregulationLimits, InsulationLimits,
                              SteppedParameter, PantingLimits, Diurnal,
-                             thermoregulate
+                             thermoregulate, thermoregulation
 
 # FluidProperties: gas-mixture struct used by EnvironmentalPars.
 using FluidProperties: GasFractions
