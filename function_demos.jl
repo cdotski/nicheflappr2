@@ -372,7 +372,7 @@ end
 let
     println("\n=== 6. Flight-power curve ===================================")
 
-    bird = quick_afpt_bird(0.05; type = :passerine)
+    bird = quick_afpt_bird(0.1; type = :passerine)
     @printf "Built bird: m = %.3f kg, b = %.3f m, S = %.4f m², BMR = %.3f W\n" bird.massTotal bird.wingSpan bird.wingArea bird.basalMetabolicRate
 
     V_mp = find_minimum_power_speed(bird)
@@ -1143,7 +1143,7 @@ end
 #   4. wing convection           (2 × wf.Q_conv_mean)
 #   5. wing longwave NET         (−2 × wf.Q_lw_net_mean)
 # ─────────────────────────────────────────────────────────────────────
-#let
+let
     println("\n=== 16. Max heat dissipation capacity vs body mass ===========")
 
     # Wind-tunnel microclimate — Ward et al. (1999) J. Exp. Biol. 202:1589-1602
@@ -1156,7 +1156,7 @@ end
         zenith_angle       = 60.0u"°",
         global_radiation   = 0.0u"W/m^2",
         diffuse_fraction   = 0,
-        relative_humidity  = 0.50,
+        relative_humidity  = 0.05,
         shade              = 1,
     )
 
@@ -1276,30 +1276,93 @@ end
     end
 
 
-# Finding a given mass bird
-mass_kg # look at 6 = ~110g 
-Q_body_conv[6]
-Q_body_lw[6]
-Q_body_evap[6]
-Q_wing_conv[6]
-Q_wing_lw[6]
-
-one_wing = Q_wing_conv[6]/2
+end
 
 
 
-m = 0.1
+
+
+
+
+    # Wind-tunnel microclimate — Ward et al. (1999) J. Exp. Biol. 202:1589-1602
+    # T_air = 22.8 °C, isothermal enclosure, no solar, RH 50 %.
+    tunnel_micro = microclimate_at_altitude(
+        altitude           = 0.0u"m",
+        air_temperature    = 22.8u"°C",
+        ground_temperature = 22.8u"°C",
+        sky_temperature    = 22.8u"°C",
+        zenith_angle       = 60.0u"°",
+        global_radiation   = 0.0u"W/m^2",
+        diffuse_fraction   = 0,
+        relative_humidity  = 0.05,
+        shade              = 1,
+    )
+
+m = 1
+
+    T_air_K    = uconvert(u"K", tunnel_micro.air_temperature)
+    T_wing_K   = T_air_K + 2.0u"K"           # wings 2 K above air
+    V_mr = afpt_v_mr(m; micro = tunnel_micro) * u"m/s"
+    V_ms = ustrip(u"m/s", V_mr)
+
 wd = build_wing_for_mass(m; n_elements = 40)
         wt = uniform_temperature(wd, T_wing_K)
+        V_mr = afpt_v_mr(m; micro = tunnel_micro) * u"m/s"
+        V_ms = ustrip(u"m/s", V_mr)
         kk = build_kinematics_for_mass(m; V_forward_ms = V_ms)
         wf = compute_wingbeat_heatbalance(kk, wd, wt, tunnel_micro;
                                           n_steps          = 40,
                                           V_forward        = V_mr,
                                           convection_model = MixedPlate())
 
+# wf.Q_lw_net_mean = Q_lw_in − Q_lw_out (wing struct convention),
+        # so negate to get "positive = net loss to environment".
+        Q_wing_conv = 2 * ustrip(u"W", wf.Q_conv_mean)
+        Q_wing_lw   = -2 * ustrip(u"W", wf.Q_lw_net_mean)
 
 
-#end
+
+# Maximum-dissipation body physiology: pant and skin_wetness at
+    # their ceilings, steps = 0 so the BB controller cannot lower them,
+    # full vasodilation, hyperthermic core.
+    max_body_kwargs = (
+        skin_wetness = 0.05,
+        pant_current = 15.0,
+        T_core       = 44.0u"°C",
+        k_flesh      = 2.8u"W/m/K",
+        thermoregulation_kwargs = (
+            pant_step         = 0.0,
+            skin_wetness_step = 0.0,
+        ),
+    )
+
+# ── BODY ────────────────────────────────────────────────────
+# run_body_thermoregulation uses V_mr as the wind speed for
+# body convection (overrides micro.wind_speed via build_environment).
+        bb   = build_body_for_mass(m)
+        br   = run_body_thermoregulation(bb, tunnel_micro;
+                                         V_air           = V_mr,
+                                         organism_kwargs = max_body_kwargs)
+        ef   = br.endotherm_out.energy_fluxes
+        tr   = br.endotherm_out.thermoregulation
+
+        Q_body_conv = ustrip(u"W", ef.Q_convection)
+        Q_body_lw   = ustrip(u"W", ef.Q_longwave_out - ef.Q_longwave_in)
+        Q_body_evap = ustrip(u"W", ef.Q_evaporation)
+        
+
+
+# Finding a given mass bird
+mass_kg # look at 6 = ~110g 
+Q_body_conv
+Q_body_lw
+Q_body_evap
+Q_wing_conv
+Q_wing_lw
+
+one_wing = Q_wing_conv/2
+
+
 
 
 
