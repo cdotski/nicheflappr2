@@ -372,7 +372,7 @@ end
 let
     println("\n=== 6. Flight-power curve ===================================")
 
-    bird = quick_afpt_bird(0.1; type = :passerine)
+    bird = quick_afpt_bird(3.65; type = :passerine)
     @printf "Built bird: m = %.3f kg, b = %.3f m, S = %.4f m², BMR = %.3f W\n" bird.massTotal bird.wingSpan bird.wingArea bird.basalMetabolicRate
 
     V_mp = find_minimum_power_speed(bird)
@@ -1361,6 +1361,322 @@ Q_wing_conv
 Q_wing_lw
 
 one_wing = Q_wing_conv/2
+
+
+# ─────────────────────────────────────────────────────────────────────
+# 17. Total heat accumulation vs body mass
+# ─────────────────────────────────────────────────────────────────────
+# Same Ward et al. (1999) wind-tunnel microclimate as demo 16
+# (T_air = 22.8 °C, isothermal walls, no solar, RH 5 %; bird at V_mr).
+#
+# Heat ACCUMULATION sources summed at each mass:
+#   1. Metabolic heat (BMR + flight costs): AFPT power_chem
+#      = (P_mech / η + BMR) × respiration-factor
+#   2. Body solar radiation absorbed:        ef.Q_solar
+#   3. Wing solar radiation absorbed:        2 × wf.Q_solar_mean  (both wings)
+#   4. Body longwave NET, only if incoming:  max(0, Q_lw_in − Q_lw_out)
+#   5. Wing longwave NET, only if incoming:  max(0, 2 × wf.Q_lw_net_mean)
+#
+# In this isothermal no-solar microclimate solar ≈ 0 W and longwave
+# is net dissipation (body/wings warmer than 22.8 °C surroundings),
+# so only metabolic heat will appear.  The LW series are plotted only
+# when at least one mass point shows net accumulation.
+# ─────────────────────────────────────────────────────────────────────
+let
+    println("\n=== 17. Total heat accumulation vs body mass ================")
+
+    # ── Bird muscle efficiency (AFPT coef_conversionEfficiency) ─────────
+    # Default 0.23 (23 %); change here to explore sensitivity.
+    η = 0.23
+
+#    # ── same microclimate as demo 16 ─────────────────────────────────
+#    tunnel_micro = microclimate_at_altitude(
+#        altitude           = 60.0u"m",
+#        air_temperature    = 22.8u"°C",
+#        ground_temperature = 22.8u"°C",
+#        sky_temperature    = 22.8u"°C",
+#        zenith_angle       = 60.0u"°",
+#        global_radiation   = 0.0u"W/m^2",
+#        diffuse_fraction   = 0.8,
+#        relative_humidity  = 0.05,
+#        shade              = 0,
+#    )
+
+    # Testing microclimates to assess sensitivity
+    tunnel_micro = microclimate_at_altitude(
+        altitude           = 10.0u"m",
+        air_temperature    = 20.0u"°C",
+        ground_temperature = 24.0u"°C",
+        sky_temperature    = 5.0u"°C",
+        zenith_angle       = 45.0u"°",
+        global_radiation   = 600.0u"W/m^2",
+        diffuse_fraction   = 0.25,
+        relative_humidity  = 0.4,
+        shade              = 0,
+    )
+
+
+
+    T_wing_K = uconvert(u"K", tunnel_micro.air_temperature) + 2.0u"K"
+
+    # Log-spaced mass sweep, 10 g – 5 kg (same as demo 16)
+    mass_kg = exp10.(range(log10(0.010), log10(5.0); length = 14))
+    n       = length(mass_kg)
+
+    Q_metabolic  = Vector{Float64}(undef, n)   # BMR + flight (AFPT power_chem)
+    Q_solar_body = Vector{Float64}(undef, n)   # body solar absorbed
+    Q_solar_wing = Vector{Float64}(undef, n)   # both wings solar absorbed
+    Q_lw_body    = Vector{Float64}(undef, n)   # body LW net, clamped ≥ 0
+    Q_lw_wing    = Vector{Float64}(undef, n)   # both wings LW net, clamped ≥ 0
+    Q_total      = Vector{Float64}(undef, n)
+    V_mr_arr     = Vector{Float64}(undef, n)
+
+    for (i, m) in enumerate(mass_kg)
+        V_mr = afpt_v_mr(m; micro = tunnel_micro) * u"m/s"
+        V_ms = ustrip(u"m/s", V_mr)
+
+        # ── metabolic heat: AFPT chemical power (BMR + P_mech/η) × R ─
+        bird = build_afpt_bird(m, wing_span_allometry(m);
+                               wingArea = wing_area_allometry(m),
+                               coef_conversionEfficiency = η)
+        fp   = compute_flapping_power(bird, V_ms)
+        Q_metabolic[i] = fp.power_chem   # [W]
+
+        # ── body: solar absorbed + LW net ─────────────────────────────
+        bb = build_body_for_mass(m)
+        br = run_body_thermoregulation(bb, tunnel_micro; V_air = V_mr)
+        ef = br.endotherm_out.energy_fluxes
+
+        Q_solar_body[i]  = ustrip(u"W", ef.Q_solar)
+        lw_body_net      = ustrip(u"W", ef.Q_longwave_in - ef.Q_longwave_out)
+        Q_lw_body[i]     = max(0.0, lw_body_net)   # accumulation only
+
+        # ── wings: solar absorbed + LW net (both wings) ───────────────
+        wd = build_wing_for_mass(m; n_elements = 10)
+        wt = uniform_temperature(wd, T_wing_K)
+        kk = build_kinematics_for_mass(m; V_forward_ms = V_ms)
+        wf = compute_wingbeat_heatbalance(kk, wd, wt, tunnel_micro;
+                                          n_steps          = 40,
+                                          V_forward        = V_mr,
+                                          convection_model = MixedPlate())
+
+        Q_solar_wing[i] = 2 * ustrip(u"W", wf.Q_solar_mean)
+        # wf.Q_lw_net_mean = Q_lw_in − Q_lw_out (wing convention); × 2 for both wings
+        lw_wing_net     = 2 * ustrip(u"W", wf.Q_lw_net_mean)
+        Q_lw_wing[i]    = max(0.0, lw_wing_net)   # accumulation only
+
+        Q_total[i]  = Q_metabolic[i] + Q_solar_body[i] + Q_solar_wing[i] +
+                      Q_lw_body[i]   + Q_lw_wing[i]
+        V_mr_arr[i] = V_ms
+    end
+
+    # ── report which radiation terms contribute ───────────────────────
+    any_solar      = any(>(0.0), Q_solar_body) || any(>(0.0), Q_solar_wing)
+    any_body_lw    = any(>(0.0), Q_lw_body)
+    any_wing_lw    = any(>(0.0), Q_lw_wing)
+    println("   Body solar > 0              : ", any(>(0.0), Q_solar_body) ? "YES" : "NO")
+    println("   Wing solar > 0              : ", any(>(0.0), Q_solar_wing) ? "YES" : "NO")
+    println("   Body LW net accumulation    : ", any_body_lw ? "YES (plotted)" : "NO — net loss, not plotted")
+    println("   Wing LW net accumulation    : ", any_wing_lw ? "YES (plotted)" : "NO — net loss, not plotted")
+
+    if _PLOTS_AVAILABLE
+        mass_g = mass_kg .* 1000
+        p = Plots.plot(
+            mass_g, Q_total;
+            xlabel  = "body mass [g]", ylabel = "heat accumulation [W]",
+        #    xscale  = :log10,
+            lw = 3, color = :black, label = "total",
+            title   = "Total heat accumulation vs mass\n" *
+                      "(Ward et al. 1999 tunnel: T_air = 22.8 °C, RH = 5 %, " *
+                      "isothermal walls, no solar; flying at V_mr)",
+            legend  = :topleft, legendfontsize = 7,
+        )
+        Plots.plot!(p, mass_g, Q_metabolic;
+                    lw = 2, color = :purple,
+                    label = "metabolic heat (BMR + flight, AFPT)")
+        if any_solar
+            Plots.plot!(p, mass_g, Q_solar_body;
+                        lw = 2, color = :gold,
+                        label = "body solar")
+            Plots.plot!(p, mass_g, Q_solar_wing;
+                        lw = 2, color = :gold, linestyle = :dash,
+                        label = "wing solar (both)")
+        end
+        if any_body_lw
+            Plots.plot!(p, mass_g, Q_lw_body;
+                        lw = 2, color = :darkorange,
+                        label = "body longwave (net in)")
+        end
+        if any_wing_lw
+            Plots.plot!(p, mass_g, Q_lw_wing;
+                        lw = 2, color = :darkorange, linestyle = :dash,
+                        label = "wing longwave (net in, both)")
+        end
+        display(p)
+    else
+        println("   m[g]    V_mr   Q_metab  Q_s_body  Q_s_wing  " *
+                "Q_lw_body  Q_lw_wing  Q_total")
+        for i in 1:n
+            @printf "  %7.1f  %5.2f  %7.3f  %8.4f  %8.4f  %9.4f  %9.4f  %7.3f\n" (
+                mass_kg[i]*1000) V_mr_arr[i] Q_metabolic[i] Q_solar_body[i] (
+                Q_solar_wing[i]) Q_lw_body[i] Q_lw_wing[i] Q_total[i]
+        end
+    end
+end
+
+
+# ─────────────────────────────────────────────────────────────────────
+# 18. Total heat gains vs total heat losses on the same graph
+# ─────────────────────────────────────────────────────────────────────
+# Same Ward et al. (1999) microclimate and mass sweep as demos 16–17.
+# Maximum-dissipation body physiology (pant = 15, skin_wetness = 0.05,
+# full vasodilation, hyperthermic core) as in demo 16, so losses are
+# at their physiological ceiling and the two lines can cross.
+#
+# Gains line  = metabolic heat (AFPT power_chem)
+#             + body solar absorbed
+#             + wing solar absorbed (both wings)
+#             + body LW net  IF incoming > outgoing  (positive contribution)
+#             + wing LW net  IF incoming > outgoing  (positive contribution)
+#
+# Losses line = body convection
+#             + body evaporation
+#             + wing convection (both wings)
+#             + body LW net  IF outgoing > incoming  (positive contribution)
+#             + wing LW net  IF outgoing > incoming  (positive contribution)
+#
+# LW is counted ONCE: it goes entirely to either gains or losses
+# depending on its sign at that mass and microclimate.
+# ─────────────────────────────────────────────────────────────────────
+let
+    println("\n=== 18. Total heat gains vs total heat losses vs mass =======")
+
+    # ── Bird muscle efficiency (AFPT coef_conversionEfficiency) ─────────
+    # Default 0.23 (23 %); change here to explore sensitivity.
+    η = 0.23
+
+    # ── microclimate (same as demos 16–17) ───────────────────────────
+    tunnel_micro = microclimate_at_altitude(
+        altitude           = 10.0u"m",
+        air_temperature    = 22.8u"°C",
+        ground_temperature = 22.8u"°C",
+        sky_temperature    = 22.8u"°C",
+        zenith_angle       = 60.0u"°",
+        global_radiation   = 0.0u"W/m^2",
+        diffuse_fraction   = 0.25,
+        relative_humidity  = 0.05,
+        shade              = 0,
+    )
+
+    # Testing microclimates to assess sensitivity
+    tunnel_micro1 = microclimate_at_altitude(
+        altitude           = 10.0u"m",
+        air_temperature    = 20.0u"°C",
+        ground_temperature = 24.0u"°C",
+        sky_temperature    = 5.0u"°C",
+        zenith_angle       = 45.0u"°",
+        global_radiation   = 600.0u"W/m^2",
+        diffuse_fraction   = 0.25,
+        relative_humidity  = 0.4,
+        shade              = 0,
+    )
+
+    
+    T_wing_K = uconvert(u"K", tunnel_micro.air_temperature) + 2.0u"K"
+
+    # Maximum-dissipation body physiology (same as demo 16)
+    max_body_kwargs = (
+        skin_wetness = 0.05,
+        pant_current = 15.0,
+        T_core       = 44.0u"°C",
+        k_flesh      = 2.8u"W/m/K",
+        thermoregulation_kwargs = (
+            pant_step         = 0.0,
+            skin_wetness_step = 0.0,
+        ),
+    )
+
+    # Log-spaced mass sweep, 10 g – 5 kg
+    mass_kg = exp10.(range(log10(0.010), log10(1.0); length = 14))
+    n       = length(mass_kg)
+
+    Q_gains  = Vector{Float64}(undef, n)
+    Q_losses = Vector{Float64}(undef, n)
+    V_mr_arr = Vector{Float64}(undef, n)
+
+    for (i, m) in enumerate(mass_kg)
+        V_mr = afpt_v_mr(m; micro = tunnel_micro) * u"m/s"
+        V_ms = ustrip(u"m/s", V_mr)
+
+        # ── metabolic heat (gains) ────────────────────────────────────
+        bird = build_afpt_bird(m, wing_span_allometry(m);
+                               wingArea = wing_area_allometry(m),
+                               coef_conversionEfficiency = η)
+        fp   = compute_flapping_power(bird, V_ms)
+        Q_metabolic = fp.power_chem
+
+        # ── body fluxes ───────────────────────────────────────────────
+        bb = build_body_for_mass(m)
+        br = run_body_thermoregulation(bb, tunnel_micro;
+                                       V_air           = V_mr,
+                                       organism_kwargs = max_body_kwargs)
+        ef = br.endotherm_out.energy_fluxes
+
+        Q_solar_body  = ustrip(u"W", ef.Q_solar)
+        Q_body_conv   = ustrip(u"W", ef.Q_convection)
+        Q_body_evap   = ustrip(u"W", ef.Q_evaporation)
+        # positive = net incoming for body
+        lw_body_net   = ustrip(u"W", ef.Q_longwave_in - ef.Q_longwave_out)
+
+        # ── wing fluxes (both wings) ──────────────────────────────────
+        wd = build_wing_for_mass(m; n_elements = 10)
+        wt = uniform_temperature(wd, T_wing_K)
+        kk = build_kinematics_for_mass(m; V_forward_ms = V_ms)
+        wf = compute_wingbeat_heatbalance(kk, wd, wt, tunnel_micro;
+                                          n_steps          = 40,
+                                          V_forward        = V_mr,
+                                          convection_model = MixedPlate())
+
+        Q_solar_wing  = 2 * ustrip(u"W", wf.Q_solar_mean)
+        Q_wing_conv   = 2 * ustrip(u"W", wf.Q_conv_mean)
+        # wf.Q_lw_net_mean = Q_lw_in − Q_lw_out (wing convention)
+        lw_wing_net   = 2 * ustrip(u"W", wf.Q_lw_net_mean)
+
+        # ── assign LW to gains or losses (counted once) ───────────────
+        lw_body_gain  = max(0.0, lw_body_net)
+        lw_body_loss  = max(0.0, -lw_body_net)
+        lw_wing_gain  = max(0.0, lw_wing_net)
+        lw_wing_loss  = max(0.0, -lw_wing_net)
+
+        Q_gains[i]  = Q_metabolic + Q_solar_body + Q_solar_wing +
+                      lw_body_gain + lw_wing_gain
+        Q_losses[i] = Q_body_conv + Q_body_evap + Q_wing_conv +
+                      lw_body_loss + lw_wing_loss
+        V_mr_arr[i] = V_ms
+    end
+
+    if _PLOTS_AVAILABLE
+        mass_g = mass_kg .* 1000
+        p = Plots.plot(
+            mass_g, Q_gains;
+            xlabel  = "body mass [g]", ylabel = "heat flux [W]",
+            lw = 3, color = :red, label = "total gains",
+            title   = "Heat gains vs losses (max dissipation) vs mass\n" *
+                      " flying at V_mr, η = $(η))",
+            legend  = :topleft, legendfontsize = 8,
+        )
+        Plots.plot!(p, mass_g, Q_losses;
+                    lw = 3, color = :blue, label = "max losses")
+        display(p)
+    else
+        println("   m[g]    V_mr   Q_gains  Q_losses  balance")
+        for i in 1:n
+            @printf "  %7.1f  %5.2f  %8.3f  %8.3f  %+8.3f\n" (
+                mass_kg[i]*1000) V_mr_arr[i] Q_gains[i] Q_losses[i] (
+                Q_gains[i] - Q_losses[i])
+        end
+    end
+end
 
 
 
