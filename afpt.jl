@@ -266,9 +266,9 @@ end
 # computeReynoldsNumber.R)
 # =====================================================================
 
-"Reduced (Strouhal-like) frequency  kf = π · b · f / V  (afpt convention)."
+"Reduced (Strouhal-like) frequency  kf = 2π · b · f / V  (afpt convention)."
 reduced_frequency(wingSpan::Real, frequency::Real, speed::Real) =
-    π * wingSpan * frequency / speed
+    2π * wingSpan * frequency / speed
 
 "Chord-based Reynolds number  Re = V · L / ν."
 compute_reynolds_number(speed::Real, chord::Real, viscosity::Real) =
@@ -679,14 +679,13 @@ end
 """
     find_maximum_range_speed(bird; V_lo, V_hi, tol, kwargs...) → Float64
 
-Maximum-range speed V_mr [m/s] — minimises the cost of transport
-`P(V) / V` (afpt findMaximumRangeSpeed.R).
+Maximum-range speed V_mr [m/s] — minimises the chemical cost of
+transport `P_chem(V) / V` (afpt findMaximumRangeSpeed.R; no wind).
 """
 function find_maximum_range_speed(bird::AfptBird;
                                   V_lo::Real = 1.0, V_hi::Real = 50.0,
                                   tol::Real = 0.01, kwargs...)
-    f = _power_curve(bird; kwargs...)
-    cost = V -> f(V) / V
+    cost = V -> compute_flapping_power(bird, V; kwargs...).power_chem / V
     return _golden_section(cost, V_lo, V_hi; tol = tol)
 end
 

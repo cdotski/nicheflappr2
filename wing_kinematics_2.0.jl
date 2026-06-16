@@ -321,13 +321,11 @@ end
     reduced_frequency(b, f, U) → Float64
 
 Reduced (Strouhal-style) frequency used by afpt:
-    k_f = π · b · f / U
+    k_f = 2π · b · f / U
 
 where `b` is wingspan and `U` is flight speed.  This matches the afpt-r
-convention used by `FLAPPINGMODELCOEFFS`.  Earlier versions of this
-module used `2π·f·b/U` (factor-of-2 different) — that has been
-corrected here, and the function now delegates directly to
-`AFPT.reduced_frequency`.
+convention used by `FLAPPINGMODELCOEFFS`, and this function delegates
+directly to `AFPT.reduced_frequency`.
 """
 function reduced_frequency(b, f, U)
     b_m = isa(b, Quantity) ? ustrip(u"m",   b) : b
