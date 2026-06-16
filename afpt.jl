@@ -128,7 +128,7 @@ compute_body_frontal_area(m_empty::Real, type::Symbol = :other) =
                           0.00813 * m_empty^0.666
 
 # ---------------------------------------------------------------------
-# Wing-geometry allometries (Pennycuick 2008 cross-species regressions).
+# Wing-geometry allometries (Rayner 1988 cross-species regressions).
 #
 # These are not part of afpt-r itself (afpt's Bird() takes wingSpan and
 # wingArea as inputs), but they are the same Pennycuick relations afpt
@@ -136,24 +136,26 @@ compute_body_frontal_area(m_empty::Real, type::Symbol = :other) =
 # WingKinematics) currently each re-implement.  We make them canonical
 # here so every consumer dispatches through AFPT.
 #
-#     b  = 1.17  · m^0.39     [m]    wing span (full)
-#     S  = 0.16  · m^0.72     [m²]   total wing area (both wings)
+#     b  = 1.165 * m_kg^0.394     [m]    wing span (full)
+#     S  = 0.1576 * m_kg^0.722     [m²]   total wing area (both wings)
 #     c̄  = S / b              [m]    mean chord
 #     AR = b² / S
 #
 # Inputs are body mass m_kg in kilograms; outputs are plain Float64.
 # ---------------------------------------------------------------------
 
-"Full wing span [m] from body mass [kg] (Pennycuick 2008)."
-wing_span_allometry(m_kg::Real)   = 1.17 * m_kg^0.39
 
-"Total wing area [m²] (both wings) from body mass [kg] (Pennycuick 2008)."
-wing_area_allometry(m_kg::Real)   = 0.16 * m_kg^0.72
+# Noting that the Rayner 1988 allometries exclude hummingbirds
+"Full wing span [m] from body mass [kg] (Rayner 1988)."
+wing_span_allometry(m_kg::Real)   = 1.165 * m_kg^0.394
 
-"Mean chord [m]: c̄ = S/b (Pennycuick 2008 allometries)."
+"Total wing area [m²] (both wings) from body mass [kg] (Rayner 1988)." 
+wing_area_allometry(m_kg::Real)   = 0.1576 * m_kg^0.722
+
+"Mean chord [m]: c̄ = S/b (Pennycuick 2008 definition)."
 mean_chord_allometry(m_kg::Real)  = wing_area_allometry(m_kg) / wing_span_allometry(m_kg)
 
-"Aspect ratio AR = b²/S (Pennycuick 2008 allometries)."
+"Aspect ratio AR = b²/S (Pennycuick 2008 definition)."
 aspect_ratio_allometry(m_kg::Real) = wing_span_allometry(m_kg)^2 / wing_area_allometry(m_kg)
 
 # afpt characteristic wingbeat frequency (Bird.R .estimateFrequency)
