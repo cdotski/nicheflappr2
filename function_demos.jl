@@ -283,9 +283,9 @@ end
 let
     println("\n=== 5.1 Convection-only: AFPT vs Strouhal kinematics ========")
 
-    m_kg   = 0.1
+    m_kg   = 0.05
     T_air  = 22.8u"°C"
-    ΔT     = 2.0u"K"
+    ΔT     = 3.0u"K"
     T_wing = uconvert(u"°C", uconvert(u"K", T_air) + ΔT)
 
     # Wind-tunnel microclimate — identical to demos 5 and 16.
@@ -1281,7 +1281,7 @@ end
 
 
 
-
+# 16.a Running the fluxes for a single mass point to see the numbers.
 
 
     # Wind-tunnel microclimate — Ward et al. (1999) J. Exp. Biol. 202:1589-1602
@@ -1298,7 +1298,7 @@ end
         shade              = 1,
     )
 
-m = 1
+m = 0.09
 
     T_air_K    = uconvert(u"K", tunnel_micro.air_temperature)
     T_wing_K   = T_air_K + 2.0u"K"           # wings 2 K above air
@@ -1350,17 +1350,13 @@ wd = build_wing_for_mass(m; n_elements = 40)
         Q_body_lw   = ustrip(u"W", ef.Q_longwave_out - ef.Q_longwave_in)
         Q_body_evap = ustrip(u"W", ef.Q_evaporation)
         
+# yuh
 
 
-# Finding a given mass bird
-mass_kg # look at 6 = ~110g 
-Q_body_conv
-Q_body_lw
-Q_body_evap
-Q_wing_conv
-Q_wing_lw
 
-one_wing = Q_wing_conv/2
+
+
+
 
 
 # ─────────────────────────────────────────────────────────────────────
