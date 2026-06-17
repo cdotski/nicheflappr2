@@ -501,7 +501,7 @@ let
 
     # ---- choose one: scale from mass, or build a wing by hand --------
     use_scaled = true   # flip to false to use the by-hand wing below
-    m_kg       = 0.05
+    m_kg       = 0.09
     n_elements = 16
     n_steps    = 60
 
@@ -517,7 +517,7 @@ let
                             thickness   = 0.002u"m")
         wd   = discretize_wing(wing, Discretization(n_elements = n_elements))
         V_mr = 8.0
-        kin  = build_kinematics_for_mass(0.05, V_forward_ms = V_mr)
+        kin  = build_kinematics_for_mass(m_kg, V_forward_ms = V_mr)
     end
 
     # ---- sample v_realised on the (element × time) grid --------------
@@ -1280,8 +1280,9 @@ end
 
 
 
-
+# ─────────────────────────────────────────────────────────────────────
 # 16.a Running the fluxes for a single mass point to see the numbers.
+# ──────────────────────────────────────────────────────────────────────
 
 
     # Wind-tunnel microclimate — Ward et al. (1999) J. Exp. Biol. 202:1589-1602
@@ -1350,7 +1351,11 @@ wd = build_wing_for_mass(m; n_elements = 40)
         Q_body_lw   = ustrip(u"W", ef.Q_longwave_out - ef.Q_longwave_in)
         Q_body_evap = ustrip(u"W", ef.Q_evaporation)
         
-# yuh
+
+# yuh, now for the gains
+        Q_solar_body[i]  = ustrip(u"W", ef.Q_solar)
+        lw_body_net      = ustrip(u"W", ef.Q_longwave_in - ef.Q_longwave_out)
+        Q_lw_body[i]     = max(0.0, lw_body_net)   # accumulation only
 
 
 
